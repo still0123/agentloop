@@ -1,0 +1,23 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "loopsmith"
+version = "0.1.0"
+description = "LoopSmith — a hand-forged minimal coding agent harness: agent loop, tool dispatch, permission gates, hooks, 4-stage context compaction, and multi-provider model routing."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "LoopSmith contributors" }]
+keywords = ["agent", "llm", "coding-agent", "harness", "claude-code"]
+dependencies = ["httpx>=0.27"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+loopsmith = "loopsmith.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
