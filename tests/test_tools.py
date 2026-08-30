@@ -1,4 +1,4 @@
-from loopsmith.tools import TodoManager, build_toolbox, safe_path
+from agentloop.tools import TodoManager, build_toolbox, safe_path
 
 
 def _run(box, name, **kwargs):
@@ -36,7 +36,7 @@ def test_path_escape_is_blocked(workdir):
     out = _run(box, "write_file", path="../evil.txt", content="x")
     assert out.startswith("Error:")
     assert not (workdir.parent / "evil.txt").exists()
-    out2 = _run(box, "write_file", path="/tmp/loopsmith-evil.txt", content="x")
+    out2 = _run(box, "write_file", path="/tmp/agentloop-evil.txt", content="x")
     assert out2.startswith("Error:")
 
 

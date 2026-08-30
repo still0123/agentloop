@@ -1,7 +1,7 @@
-"""压缩管线测试 —— LoopSmith 的深挖机制，重点验证四步顺序与配对不变量。"""
+"""压缩管线测试 —— AgentLoop 的深挖机制，重点验证四步顺序与配对不变量。"""
 
-from loopsmith.compact import Compactor, _has_tool_use, _is_tool_result_msg
-from loopsmith.models import MockClient
+from agentloop.compact import Compactor, _has_tool_use, _is_tool_result_msg
+from agentloop.models import MockClient
 
 
 def _pair(tid, result_text):

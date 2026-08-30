@@ -1,7 +1,7 @@
 """模型接入层 —— 多提供商路由 + 统一内部格式。
 
-这是 LoopSmith 相对教程版的主要差异化点之一：教程绑定 Anthropic SDK
-单一模型；LoopSmith 把"调用模型"抽象成边界适配器：
+这是 AgentLoop 相对教程版的主要差异化点之一：教程绑定 Anthropic SDK
+单一模型；AgentLoop 把"调用模型"抽象成边界适配器：
 
     内部统一格式（Anthropic 风格 content blocks）
         ↑↓ 适配只发生在这层边界上
@@ -367,7 +367,7 @@ def _first_env(envs: tuple, get) -> str | None:
 
 def build_client(model: str | None = None, env: dict | None = None):
     """根据环境变量组装模型客户端。优先级：
-    显式 BASE_URL+API_KEY > LOOPSMITH_PROVIDER > 模型名前缀检测 > openai。
+    显式 BASE_URL+API_KEY > AGENTLOOP_PROVIDER > 模型名前缀检测 > openai。
     """
     import os as _os
     if env is not None:  # 测试注入用
@@ -375,24 +375,24 @@ def build_client(model: str | None = None, env: dict | None = None):
     else:
         get = _os.environ.get
 
-    model = (model or get("LOOPSMITH_MODEL", "")).strip()
+    model = (model or get("AGENTLOOP_MODEL", "")).strip()
     if not model:
         raise SystemExit(
-            "未设置模型。请在 .env 或环境变量中配置 LOOPSMITH_MODEL，例如：\n"
-            "  LOOPSMITH_MODEL=glm-4.6        GLM_API_KEY=...\n"
-            "  LOOPSMITH_MODEL=deepseek-chat  DEEPSEEK_API_KEY=...\n"
-            "  LOOPSMITH_MODEL=qwen-max       DASHSCOPE_API_KEY=...\n"
-            "  LOOPSMITH_MODEL=claude-sonnet-4-5  ANTHROPIC_API_KEY=...\n"
-            "  或自定义端点：LOOPSMITH_BASE_URL + LOOPSMITH_API_KEY"
+            "未设置模型。请在 .env 或环境变量中配置 AGENTLOOP_MODEL，例如：\n"
+            "  AGENTLOOP_MODEL=glm-4.6        GLM_API_KEY=...\n"
+            "  AGENTLOOP_MODEL=deepseek-chat  DEEPSEEK_API_KEY=...\n"
+            "  AGENTLOOP_MODEL=qwen-max       DASHSCOPE_API_KEY=...\n"
+            "  AGENTLOOP_MODEL=claude-sonnet-4-5  ANTHROPIC_API_KEY=...\n"
+            "  或自定义端点：AGENTLOOP_BASE_URL + AGENTLOOP_API_KEY"
         )
 
-    base_url = get("LOOPSMITH_BASE_URL", "").strip()
-    api_key = get("LOOPSMITH_API_KEY", "").strip()
-    provider = get("LOOPSMITH_PROVIDER", "").strip().lower() or None
-    max_tokens = int(get("LOOPSMITH_MAX_TOKENS", "8000"))
+    base_url = get("AGENTLOOP_BASE_URL", "").strip()
+    api_key = get("AGENTLOOP_API_KEY", "").strip()
+    provider = get("AGENTLOOP_PROVIDER", "").strip().lower() or None
+    max_tokens = int(get("AGENTLOOP_MAX_TOKENS", "8000"))
 
     if provider and provider not in PROFILES:
-        raise SystemExit(f"未知 LOOPSMITH_PROVIDER: {provider}，可选: {sorted(PROFILES)}")
+        raise SystemExit(f"未知 AGENTLOOP_PROVIDER: {provider}，可选: {sorted(PROFILES)}")
 
     if provider == "anthropic":
         key = api_key or _first_env(PROFILES["anthropic"].api_key_envs, get)

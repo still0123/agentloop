@@ -1,4 +1,4 @@
-"""命令行入口 —— python -m loopsmith [prompt] 或安装后 loopsmith 命令。
+"""命令行入口 —— python -m agentloop [prompt] 或安装后 agentloop 命令。
 
 不带参数进入 REPL（会话消息跨轮保留，压缩管线负责控制增长），
 带参数则单次执行。工具调用以暗色日志打印，退出时输出 token 统计。
@@ -46,8 +46,8 @@ def _short(value) -> str:
 def build_default_agent(workdir: Path, verbose_tools: bool = True) -> Agent:
     client = build_client()
 
-    # 备用模型：LOOPSMITH_FALLBACK_MODELS="a,b"（可跨提供商）
-    fallbacks = [m.strip() for m in os.environ.get("LOOPSMITH_FALLBACK_MODELS", "").split(",") if m.strip()]
+    # 备用模型：AGENTLOOP_FALLBACK_MODELS="a,b"（可跨提供商）
+    fallbacks = [m.strip() for m in os.environ.get("AGENTLOOP_FALLBACK_MODELS", "").split(",") if m.strip()]
     if fallbacks:
         client = FallbackClient([client, *(_build_named(m) for m in fallbacks)])
 
@@ -63,7 +63,7 @@ def build_default_agent(workdir: Path, verbose_tools: bool = True) -> Agent:
     compactor = Compactor(workdir, client=client)
 
     system_prompt = (
-        f"You are LoopSmith, a coding agent working in {workdir}. "
+        f"You are AgentLoop, a coding agent working in {workdir}. "
         "Use tools to solve tasks; act, don't explain. "
         "For multi-step tasks, call todo_write first and keep it updated. "
         "After running verification commands, state the command and its exit code "
@@ -73,16 +73,16 @@ def build_default_agent(workdir: Path, verbose_tools: bool = True) -> Agent:
 
 
 def _build_named(model: str):
-    """为备用模型临时切换 LOOPSMITH_MODEL 再构建。"""
-    old = os.environ.get("LOOPSMITH_MODEL")
-    os.environ["LOOPSMITH_MODEL"] = model
+    """为备用模型临时切换 AGENTLOOP_MODEL 再构建。"""
+    old = os.environ.get("AGENTLOOP_MODEL")
+    os.environ["AGENTLOOP_MODEL"] = model
     try:
         return build_client(model)
     finally:
         if old is None:
-            os.environ.pop("LOOPSMITH_MODEL", None)
+            os.environ.pop("AGENTLOOP_MODEL", None)
         else:
-            os.environ["LOOPSMITH_MODEL"] = old
+            os.environ["AGENTLOOP_MODEL"] = old
 
 
 def main(argv: list | None = None) -> int:
@@ -96,7 +96,7 @@ def main(argv: list | None = None) -> int:
         print(exc)
         return 2
 
-    print(f"🔨 LoopSmith 0.1.0 — model: {agent.client.model}  workdir: {workdir}")
+    print(f"AgentLoop 0.1.0 — model: {agent.client.model}  workdir: {workdir}")
     print("   输入任务开始；q / exit 退出。\n")
 
     total_usage = {"input_tokens": 0, "output_tokens": 0}
@@ -119,7 +119,7 @@ def main(argv: list | None = None) -> int:
     session: list = []
     while True:
         try:
-            line = input("loopsmith >> ").strip()
+            line = input("agentloop >> ").strip()
         except (EOFError, KeyboardInterrupt):
             break
         if not line:

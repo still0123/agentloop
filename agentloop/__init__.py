@@ -1,4 +1,4 @@
-"""LoopSmith — 手工锻造的最小可用 Coding Agent Harness。
+"""AgentLoop — 最小可用 Coding Agent Harness。
 
 核心理念（学自 learn-claude-code / Claude Code）：
 Agency 来自模型，Harness 是载具。循环属于 agent，机制属于 harness。

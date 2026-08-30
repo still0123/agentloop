@@ -1,8 +1,8 @@
-# LoopSmith — 手工锻造的最小 Coding Agent Harness
+# AgentLoop — 最小 Coding Agent Harness
 
 > *The loop is the agent; everything else is a hook.*
 
-LoopSmith 是在深入研读
+AgentLoop 是在深入研读
 [shareAI-lab/learn-claude-code](https://github.com/shareAI-lab/learn-claude-code)
 后，从零实现并扩展的最小 Coding Agent Harness。原课程采用
 [MIT License](https://github.com/shareAI-lab/learn-claude-code/blob/main/LICENSE)；
@@ -13,7 +13,7 @@ LoopSmith 是在深入研读
 很多 Agent 框架把循环、工具协议、权限和上下文管理藏在 SDK 或层层抽象后面。
 能调用框架，不等于知道 Claude Code 一类产品为什么这样组织。
 
-LoopSmith 把范围压到一个单机、单会话 REPL：循环只有一个退出信号，其余能力都挂在
+AgentLoop 把范围压到一个单机、单会话 REPL：循环只有一个退出信号，其余能力都挂在
 明确边界上。实现保持可读、可测试、可审计，适合逐行解释每个机制的职责。
 
 ## 架构
@@ -58,13 +58,13 @@ flowchart TD
 
 | 机制 | 课程章节 | 一句话 | 代码入口 |
 |---|---|---|---|
-| Agent Loop | s01 | 调模型、执行工具、回填结果，直到没有 `tool_use` | `loopsmith/agent.py` |
-| 工具分发 | s02 | 6 个工具通过注册表查找，错误转成结果而不炸循环 | `loopsmith/tools.py` |
-| 权限闸门 | s03 | 拒绝表、风险规则、用户审批依次执行 | `loopsmith/permission.py` |
-| 四事件 Hooks | s04 | 输入、执行前、执行后、停止四个扩展点 | `loopsmith/hooks.py` |
-| TodoWrite | s05 | 约束计划状态，连续 3 轮未更新时注入提醒 | `loopsmith/tools.py`、`loopsmith/agent.py` |
-| 上下文压缩 | s08 | 先做零 API 成本处理，最后才调用模型摘要 | `loopsmith/compact.py` |
-| 多模型路由 | 扩展 | 两类协议、多提供商、故障切换和 token 统计 | `loopsmith/models.py` |
+| Agent Loop | s01 | 调模型、执行工具、回填结果，直到没有 `tool_use` | `agentloop/agent.py` |
+| 工具分发 | s02 | 6 个工具通过注册表查找，错误转成结果而不炸循环 | `agentloop/tools.py` |
+| 权限闸门 | s03 | 拒绝表、风险规则、用户审批依次执行 | `agentloop/permission.py` |
+| 四事件 Hooks | s04 | 输入、执行前、执行后、停止四个扩展点 | `agentloop/hooks.py` |
+| TodoWrite | s05 | 约束计划状态，连续 3 轮未更新时注入提醒 | `agentloop/tools.py`、`agentloop/agent.py` |
+| 上下文压缩 | s08 | 先做零 API 成本处理，最后才调用模型摘要 | `agentloop/compact.py` |
+| 多模型路由 | 扩展 | 两类协议、多提供商、故障切换和 token 统计 | `agentloop/models.py` |
 
 ```mermaid
 flowchart LR
@@ -97,27 +97,27 @@ cp .env.example .env
 在 `.env` 中填写一个模型及对应 API key，然后运行单次任务：
 
 ```bash
-python -m loopsmith "list the python files here"
+python -m agentloop "list the python files here"
 ```
 
 不传参数进入保留会话历史的 REPL，输入 `q`、`quit` 或 `exit` 退出：
 
 ```bash
-python -m loopsmith
+python -m agentloop
 ```
 
 备用模型可跨提供商，按顺序尝试：
 
 ```bash
-LOOPSMITH_FALLBACK_MODELS=deepseek-chat,qwen-max
+AGENTLOOP_FALLBACK_MODELS=deepseek-chat,qwen-max
 ```
 
 Ollama 等本地 OpenAI 兼容端点不要求真实 key：
 
 ```bash
-LOOPSMITH_MODEL=llama3
-LOOPSMITH_BASE_URL=http://localhost:11434/v1
-LOOPSMITH_API_KEY=ollama
+AGENTLOOP_MODEL=llama3
+AGENTLOOP_BASE_URL=http://localhost:11434/v1
+AGENTLOOP_API_KEY=ollama
 ```
 
 ## 多模型路由
@@ -131,8 +131,8 @@ LOOPSMITH_API_KEY=ollama
 | `claude` | Anthropic | `https://api.anthropic.com` | `ANTHROPIC_API_KEY` |
 | `gpt-`、`o1`、`o3`、`o4` | OpenAI | `https://api.openai.com/v1` | `OPENAI_API_KEY` |
 
-`LOOPSMITH_PROVIDER` 可显式选择提供商；`LOOPSMITH_BASE_URL` 和
-`LOOPSMITH_API_KEY` 可覆盖端点与密钥。自定义端点默认按 OpenAI 兼容协议处理，
+`AGENTLOOP_PROVIDER` 可显式选择提供商；`AGENTLOOP_BASE_URL` 和
+`AGENTLOOP_API_KEY` 可覆盖端点与密钥。自定义端点默认按 OpenAI 兼容协议处理，
 显式选择 `anthropic` 时仍使用 Anthropic 原生协议。
 
 `FallbackClient` 只在当前客户端最终抛出 `ModelError` 后切换到下一个模型。
@@ -199,7 +199,7 @@ LOOPSMITH_API_KEY=ollama
 
 ## License 与致谢
 
-LoopSmith 采用 [MIT License](LICENSE)。
+AgentLoop 采用 [MIT License](LICENSE)。
 
 感谢 [learn-claude-code](https://github.com/shareAI-lab/learn-claude-code)
 对 Claude Code 式 Harness 机制的系统拆解，以及 Claude Code 提供的产品概念参照。

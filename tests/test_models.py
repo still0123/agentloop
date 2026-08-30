@@ -4,8 +4,8 @@ import json
 
 import pytest
 
-from loopsmith.agent import _is_prompt_too_long
-from loopsmith.models import (
+from agentloop.agent import _is_prompt_too_long
+from agentloop.models import (
     AnthropicClient,
     FallbackClient,
     MockClient,
@@ -117,7 +117,7 @@ def test_build_client_env_injection():
     assert isinstance(anthropic, AnthropicClient)
 
     local = build_client(
-        "llama3", env={"LOOPSMITH_BASE_URL": "http://localhost:11434/v1"}
+        "llama3", env={"AGENTLOOP_BASE_URL": "http://localhost:11434/v1"}
     )
     assert isinstance(local, OpenAICompatClient)
     assert local.base_url == "http://localhost:11434/v1"
@@ -125,12 +125,12 @@ def test_build_client_env_injection():
 
     with pytest.raises(SystemExit, match="GLM_API_KEY"):
         build_client("glm-4.6", env={})
-    with pytest.raises(SystemExit, match="LOOPSMITH_MODEL"):
+    with pytest.raises(SystemExit, match="AGENTLOOP_MODEL"):
         build_client(None, env={})
 
     explicit = build_client(
         "x",
-        env={"LOOPSMITH_PROVIDER": "anthropic", "ANTHROPIC_API_KEY": "k"},
+        env={"AGENTLOOP_PROVIDER": "anthropic", "ANTHROPIC_API_KEY": "k"},
     )
     assert isinstance(explicit, AnthropicClient)
 

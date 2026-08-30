@@ -46,7 +46,7 @@ def test_post_tool_use_observes_output(workdir):
 
 
 def test_unknown_event_rejected(workdir):
-    from loopsmith.hooks import HookRegistry
+    from agentloop.hooks import HookRegistry
 
     registry = HookRegistry()
     try:

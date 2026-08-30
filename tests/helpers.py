@@ -1,11 +1,11 @@
 """测试工厂：组装一个用 MockClient 驱动的完整 Agent，不碰网络。"""
 
-from loopsmith.agent import Agent
-from loopsmith.compact import Compactor
-from loopsmith.hooks import HookRegistry
-from loopsmith.models import MockClient
-from loopsmith.permission import PermissionGate, allow_all
-from loopsmith.tools import build_toolbox
+from agentloop.agent import Agent
+from agentloop.compact import Compactor
+from agentloop.hooks import HookRegistry
+from agentloop.models import MockClient
+from agentloop.permission import PermissionGate, allow_all
+from agentloop.tools import build_toolbox
 
 
 def make_agent(
