@@ -14,4 +14,4 @@ Agency 来自模型，Harness 是载具。循环属于 agent，机制属于 harn
     cli.py       REPL 入口
 """
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"

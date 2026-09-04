@@ -12,6 +12,7 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 
+from . import __version__
 from .agent import Agent
 from .compact import Compactor
 from .hooks import HookRegistry
@@ -129,7 +130,7 @@ def main(argv: list | None = None) -> int:
         print(exc)
         return 2
 
-    print(f"AgentLoop 0.1.0 — model: {agent.client.model}  workdir: {workdir}")
+    print(f"AgentLoop {__version__} — model: {agent.client.model}  workdir: {workdir}")
     print("   输入任务开始；q / exit 退出。\n")
 
     total_usage = {"input_tokens": 0, "output_tokens": 0}

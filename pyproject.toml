@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agentloop"
-version = "0.1.0"
+version = "0.1.1"
 description = "AgentLoop — a minimal coding agent harness: agent loop, tool dispatch, permission gates, hooks, context compaction, and multi-provider model routing."
 readme = "README.md"
 requires-python = ">=3.10"
