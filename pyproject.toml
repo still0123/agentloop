@@ -19,7 +19,7 @@ Repository = "https://github.com/still0123/agentloop"
 Issues = "https://github.com/still0123/agentloop/issues"
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "ruff>=0.8"]
+dev = ["build>=1.2", "pytest>=8", "ruff>=0.8"]
 
 [project.scripts]
 agentloop = "agentloop.cli:main"

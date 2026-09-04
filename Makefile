@@ -1,4 +1,4 @@
-.PHONY: install format lint test check
+.PHONY: install format lint test check package
 
 install:
 	python -m pip install -e ".[dev]"
@@ -15,3 +15,6 @@ test:
 	pytest -q
 
 check: lint test
+
+package:
+	python -m build

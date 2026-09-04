@@ -4,7 +4,7 @@
 
 **一个能逐行读懂的 Coding Agent Harness**
 
-`Python 3.10+` · `OpenAI / Anthropic` · `52 offline tests` · `MIT`
+`Python 3.10+` · `OpenAI / Anthropic` · `offline test suite` · `MIT`
 
 把模型调用、工具执行、权限控制、上下文压缩和故障切换放进一个小而完整的工程。
 
@@ -15,7 +15,7 @@
 
 ---
 
-AgentLoop 是一个单机、单会话的 Coding Agent 实现。它从
+AgentLoop 是一个单机、多会话的 Coding Agent 实现。它从
 [learn-claude-code](https://github.com/shareAI-lab/learn-claude-code)
 的课程结构出发，保留清晰的学习来源，并补上多提供商路由、权限闸门、上下文压缩、
 Fallback 和离线测试。
@@ -86,6 +86,12 @@ agentloop web
 Web 会话按工作区自动保存，支持创建、切换、改名和删除，模型文本按 Token
 增量显示。运行中可点击“停止”取消任务；正在执行的 `bash` 命令会终止整个
 子进程组。
+
+## Web UI
+
+| 工具执行与流式回答 | 危险命令权限审批 |
+|---|---|
+| ![AgentLoop Web UI 展示工具调用结果和最终回答](docs/images/web-agent.png) | ![AgentLoop Web UI 请求危险命令授权](docs/images/web-permission.png) |
 
 不配置模型也能运行全部离线测试：
 
