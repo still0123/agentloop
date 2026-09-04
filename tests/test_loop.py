@@ -135,3 +135,35 @@ def test_event_callback_reports_errors(workdir):
         "error": "RuntimeError",
         "message": "model unavailable",
     }
+
+
+def test_cancel_before_model_call(workdir):
+    agent, mock = make_agent(["never reached"], workdir, should_stop=lambda: True)
+
+    result = agent.run("stop now")
+
+    assert result.stopped_reason == "cancelled"
+    assert result.turns == 0
+    assert mock.calls == []
+
+
+def test_cancel_between_tools_skips_remaining_calls(workdir):
+    agent, mock = make_agent(
+        [
+            [
+                ("write_file", {"path": "a.txt", "content": "A"}),
+                ("write_file", {"path": "b.txt", "content": "B"}),
+            ],
+            "never reached",
+        ],
+        workdir,
+        should_stop=lambda: (workdir / "a.txt").exists(),
+    )
+
+    result = agent.run("write files")
+
+    assert result.stopped_reason == "cancelled"
+    assert (workdir / "a.txt").read_text() == "A"
+    assert not (workdir / "b.txt").exists()
+    assert any("cancelled by user" in item for item in tool_results(result.messages))
+    assert len(mock.calls) == 1

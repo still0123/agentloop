@@ -11,7 +11,10 @@
 from __future__ import annotations
 
 import glob as globlib
+import os
+import signal
 import subprocess
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -127,28 +130,43 @@ class TodoManager:
 # ---------------------------------------------------------------------------
 
 
-def build_toolbox(workdir: Path):
+def build_toolbox(workdir: Path, should_stop: Callable[[], bool] | None = None):
     """返回 (Toolbox, TodoManager)。workdir 由调用方钉死，工具闭包引用它。"""
     workdir = Path(workdir)
+    should_stop = should_stop or (lambda: False)
     todo = TodoManager()
     box = Toolbox()
 
     def run_bash(command: str, timeout: int = 60) -> str:
-        try:
-            proc = subprocess.run(
-                ["bash", "-c", command],
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                cwd=str(workdir),
-            )
-        except subprocess.TimeoutExpired:
-            return f"Error: command timed out after {timeout}s"
+        if should_stop():
+            return "Error: command cancelled by user"
+        proc = subprocess.Popen(
+            ["bash", "-c", command],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=str(workdir),
+            start_new_session=True,
+        )
+        deadline = time.monotonic() + timeout
+        while True:
+            if should_stop():
+                _terminate_process(proc)
+                return "Error: command cancelled by user"
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _terminate_process(proc)
+                return f"Error: command timed out after {timeout}s"
+            try:
+                stdout, stderr = proc.communicate(timeout=min(0.1, remaining))
+                break
+            except subprocess.TimeoutExpired:
+                continue
         parts = [f"exit={proc.returncode}"]
-        if proc.stdout:
-            parts.append("[stdout]\n" + proc.stdout)
-        if proc.stderr:
-            parts.append("[stderr]\n" + proc.stderr)
+        if stdout:
+            parts.append("[stdout]\n" + stdout)
+        if stderr:
+            parts.append("[stderr]\n" + stderr)
         text = "\n".join(parts)
         if len(text) > MAX_TOOL_OUTPUT:
             text = (
@@ -273,3 +291,18 @@ def build_toolbox(workdir: Path):
         run_todo,
     )
     return box, todo
+
+
+def _terminate_process(proc: subprocess.Popen) -> None:
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        proc.communicate(timeout=1)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.communicate()

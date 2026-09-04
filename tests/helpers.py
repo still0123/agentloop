@@ -14,6 +14,7 @@ def make_agent(
     ask=None,
     compactor_kwargs=None,
     max_turns=40,
+    should_stop=None,
 ):
     """返回 (agent, mock_client)。
 
@@ -22,7 +23,7 @@ def make_agent(
                   默认 char_limit 极大，摘要步不会触发
     """
     mock = MockClient(turns)
-    toolbox, _todo = build_toolbox(workdir)
+    toolbox, _todo = build_toolbox(workdir, should_stop=should_stop)
     hooks = HookRegistry()
     hooks.register("PreToolUse", PermissionGate(ask_user=ask or allow_all).as_hook())
 
@@ -33,7 +34,13 @@ def make_agent(
     compactor = Compactor(workdir, client=MockClient(["(summary)"]), **kwargs)
 
     agent = Agent(
-        mock, toolbox, hooks, compactor, system_prompt="test", max_turns=max_turns
+        mock,
+        toolbox,
+        hooks,
+        compactor,
+        system_prompt="test",
+        max_turns=max_turns,
+        should_stop=should_stop,
     )
     return agent, mock
 

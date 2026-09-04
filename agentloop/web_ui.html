@@ -36,6 +36,7 @@
       required
     ></textarea>
     <button id="send" type="submit">发送</button>
+    <button id="stop" class="stop-button" type="button" hidden>停止</button>
   </form>
 
   <footer class="footer">
@@ -58,6 +59,13 @@
       <pre id="permissionInput"></pre>
     </div>
     <div class="permission-actions">
+      <button
+        id="stopPermission"
+        class="danger secondary"
+        type="button"
+      >
+        停止任务
+      </button>
       <button id="deny" class="secondary" value="cancel" type="button">拒绝</button>
       <button id="allow" value="default" type="button">允许</button>
     </div>
@@ -237,6 +245,10 @@
     background: #d64545;
   }
 
+  .tool.cancelled .tool-state {
+    background: #7a818c;
+  }
+
   .tool-body {
     display: grid;
     gap: 10px;
@@ -315,6 +327,21 @@
 
   button.secondary:hover {
     background: #f0f2f5;
+  }
+
+  button.stop-button {
+    border-color: #b93838;
+    background: #c63f3f;
+  }
+
+  button.stop-button:hover {
+    background: #ad3030;
+  }
+
+  button.danger.secondary {
+    margin-right: auto;
+    border-color: #d8a0a0;
+    color: #a52a2a;
   }
 
   button.icon-button {
@@ -456,12 +483,14 @@
   const composer = document.querySelector("#composer");
   const promptInput = document.querySelector("#prompt");
   const sendButton = document.querySelector("#send");
+  const stopButton = document.querySelector("#stop");
   const statusText = document.querySelector("#statusText");
   const statusDot = document.querySelector("#statusDot");
   const usage = document.querySelector("#usage");
   const dialog = document.querySelector("#permissionDialog");
   const allowButton = document.querySelector("#allow");
   const denyButton = document.querySelector("#deny");
+  const stopPermissionButton = document.querySelector("#stopPermission");
   const newSessionButton = document.querySelector("#newSession");
   const tools = new Map();
   let activePermission = null;
@@ -470,6 +499,18 @@
   function setStatus(text, kind = "") {
     statusText.textContent = text;
     statusDot.className = `status-dot ${kind}`;
+  }
+
+  function setRunning(value) {
+    running = value;
+    sendButton.hidden = value;
+    sendButton.disabled = value;
+    stopButton.hidden = !value;
+    stopButton.disabled = false;
+    stopButton.textContent = "停止";
+    stopPermissionButton.disabled = false;
+    newSessionButton.disabled = value;
+    promptInput.disabled = value;
   }
 
   function scrollToEnd() {
@@ -524,8 +565,17 @@
   function finishTool(event) {
     const tool = tools.get(event.id);
     if (!tool) return;
-    tool.item.classList.add(event.blocked ? "blocked" : "done");
-    tool.outputLabel.textContent = event.blocked ? "已拒绝" : "输出";
+    const state = event.cancelled
+      ? "cancelled"
+      : event.blocked
+        ? "blocked"
+        : "done";
+    tool.item.classList.add(state);
+    tool.outputLabel.textContent = event.cancelled
+      ? "已取消"
+      : event.blocked
+        ? "已拒绝"
+        : "输出";
     tool.output.textContent = event.content || "(empty)";
     scrollToEnd();
   }
@@ -553,6 +603,9 @@
           finishTool(event);
           break;
         case "done":
+          if (event.stopped_reason === "cancelled") {
+            addMessage("系统", "任务已停止");
+          }
           usage.textContent =
             `${event.turns} 轮 · ${event.usage.input_tokens} 输入 · ` +
             `${event.usage.output_tokens} 输出`;
@@ -600,10 +653,13 @@
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
     renderSession(data.events);
-    running = data.active;
-    sendButton.disabled = running;
-    newSessionButton.disabled = running;
+    setRunning(data.active);
     if (running) setStatus("运行中", "busy");
+    if (data.cancelling) {
+      stopButton.disabled = true;
+      stopButton.textContent = "停止中";
+      setStatus("停止中", "busy");
+    }
     const pendingPermission = data.permissions?.[0];
     if (pendingPermission) {
       setStatus("等待授权", "busy");
@@ -640,9 +696,7 @@
     const event = JSON.parse(data);
     switch (event.type) {
       case "run_start":
-        running = true;
-        sendButton.disabled = true;
-        newSessionButton.disabled = true;
+        setRunning(true);
         setStatus("运行中", "busy");
         break;
       case "model_start":
@@ -670,19 +724,18 @@
         setStatus("运行中", "busy");
         break;
       case "done":
-        running = false;
-        sendButton.disabled = false;
-        newSessionButton.disabled = false;
-        setStatus("就绪");
+        setRunning(false);
+        setStatus(event.stopped_reason === "cancelled" ? "已停止" : "就绪");
+        if (event.stopped_reason === "cancelled") {
+          addMessage("系统", "任务已停止");
+        }
         usage.textContent =
           `${event.turns} 轮 · ${event.usage.input_tokens} 输入 · ` +
           `${event.usage.output_tokens} 输出`;
         promptInput.focus();
         break;
       case "error":
-        running = false;
-        sendButton.disabled = false;
-        newSessionButton.disabled = false;
+        setRunning(false);
         setStatus("失败", "error");
         addMessage("错误", `${event.error}: ${event.message}`, "error");
         break;
@@ -691,6 +744,12 @@
         break;
       case "session_error":
         addMessage("错误", event.message, "error");
+        break;
+      case "cancel_requested":
+        stopButton.disabled = true;
+        stopButton.textContent = "停止中";
+        stopPermissionButton.disabled = true;
+        setStatus("停止中", "busy");
         break;
     }
   };
@@ -702,16 +761,12 @@
     addMessage("你", prompt);
     promptInput.value = "";
     promptInput.style.height = "auto";
-    running = true;
-    sendButton.disabled = true;
-    newSessionButton.disabled = true;
+    setRunning(true);
     setStatus("提交中", "busy");
     try {
       await api("/api/run", { prompt });
     } catch (error) {
-      running = false;
-      sendButton.disabled = false;
-      newSessionButton.disabled = false;
+      setRunning(false);
       setStatus("失败", "error");
       addMessage("错误", error.message, "error");
     }
@@ -729,9 +784,28 @@
     promptInput.style.height = `${Math.min(promptInput.scrollHeight, 160)}px`;
   });
 
+  async function stopRun() {
+    if (!running) return;
+    stopButton.disabled = true;
+    stopButton.textContent = "停止中";
+    stopPermissionButton.disabled = true;
+    setStatus("停止中", "busy");
+    try {
+      await api("/api/stop", {});
+    } catch (error) {
+      stopButton.disabled = false;
+      stopButton.textContent = "停止";
+      stopPermissionButton.disabled = false;
+      setStatus("运行中", "busy");
+      addMessage("错误", error.message, "error");
+    }
+  }
+
   dialog.addEventListener("cancel", (event) => event.preventDefault());
   allowButton.addEventListener("click", () => resolvePermission(true));
   denyButton.addEventListener("click", () => resolvePermission(false));
+  stopButton.addEventListener("click", stopRun);
+  stopPermissionButton.addEventListener("click", stopRun);
   newSessionButton.addEventListener("click", async () => {
     if (running || !window.confirm("清空当前工作区的会话记录？")) return;
     try {

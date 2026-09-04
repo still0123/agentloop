@@ -103,6 +103,7 @@ class WebState:
         self.store = store
         self.messages, self.events = store.load() if store else ([], [])
         self._active = False
+        self._cancelled = threading.Event()
         self._lock = threading.Lock()
         self._subscribers: set[queue.Queue] = set()
         self._permissions: dict[str, tuple[queue.Queue, dict]] = {}
@@ -135,6 +136,7 @@ class WebState:
         with self._lock:
             if self._active:
                 return False
+            self._cancelled.clear()
             self._active = True
         thread = threading.Thread(target=self._run, args=(prompt,), daemon=True)
         thread.start()
@@ -189,8 +191,26 @@ class WebState:
             return {
                 "events": list(self.events),
                 "active": self._active,
+                "cancelling": self._active and self._cancelled.is_set(),
                 "permissions": [dict(event) for _, event in self._permissions.values()],
             }
+
+    def cancelled(self) -> bool:
+        return self._cancelled.is_set()
+
+    def stop(self) -> bool:
+        with self._lock:
+            if not self._active:
+                return False
+            self._cancelled.set()
+            answers = tuple(answer for answer, _ in self._permissions.values())
+        self.emit({"type": "cancel_requested"})
+        for answer in answers:
+            try:
+                answer.put_nowait(False)
+            except queue.Full:
+                pass
+        return True
 
     def reset(self) -> bool:
         with self._lock:
@@ -326,6 +346,13 @@ def make_handler(state: WebState, token: str):
                 self._json(HTTPStatus.OK, {"ok": True})
                 return
 
+            if self.path == "/api/stop":
+                if not state.stop():
+                    self._json(HTTPStatus.CONFLICT, {"error": "no active agent run"})
+                    return
+                self._json(HTTPStatus.ACCEPTED, {"ok": True})
+                return
+
             prefix = "/api/permissions/"
             if self.path.startswith(prefix):
                 request_id = self.path[len(prefix) :]
@@ -436,7 +463,10 @@ def make_server(state: WebState, token: str, port: int = 0) -> LocalHTTPServer:
 def serve(workdir: Path, port: int = 0, open_browser: bool = True) -> int:
     state = WebState(store=SessionStore(workdir))
     state.agent = build_default_agent(
-        workdir, verbose_tools=False, ask_user=state.ask_user
+        workdir,
+        verbose_tools=False,
+        ask_user=state.ask_user,
+        should_stop=state.cancelled,
     )
     token = secrets.token_urlsafe(24)
     server = make_server(state, token, port)

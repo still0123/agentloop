@@ -1,3 +1,6 @@
+import threading
+import time
+
 from agentloop.tools import TodoManager, build_toolbox, safe_path
 
 
@@ -71,6 +74,20 @@ def test_bash_exit_code_and_output(workdir):
     assert "exit=0" in out and "hi" in out
     out2 = _run(box, "bash", command="exit 3")
     assert "exit=3" in out2
+
+
+def test_bash_can_be_cancelled(workdir):
+    cancelled = threading.Event()
+    box, _ = build_toolbox(workdir, should_stop=cancelled.is_set)
+    timer = threading.Timer(0.1, cancelled.set)
+    timer.start()
+    started = time.monotonic()
+
+    out = _run(box, "bash", command="sleep 10")
+
+    timer.join()
+    assert "cancelled by user" in out
+    assert time.monotonic() - started < 3
 
 
 def test_unknown_tool(workdir):

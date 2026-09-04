@@ -87,6 +87,62 @@ def test_web_permission_approval_resumes_agent(workdir):
         thread.join(timeout=2)
 
 
+def test_web_stop_cancels_running_bash(workdir):
+    state = WebState()
+    state.agent, _ = make_agent(
+        [[("bash", {"command": "sleep 10"})], "never reached"],
+        workdir,
+        should_stop=state.cancelled,
+    )
+    events = state.subscribe()
+    token = "test-token"
+    server = make_server(state, token)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_port}"
+
+    try:
+        assert _post(base_url, token, "/api/run", {"prompt": "wait"})[0] == 202
+        assert _next(events, "tool_call")["name"] == "bash"
+        assert _post(base_url, token, "/api/stop", {}) == (202, {"ok": True})
+        done = _next(events, "done")
+        assert done["stopped_reason"] == "cancelled"
+        assert state.snapshot()["active"] is False
+    finally:
+        state.unsubscribe(events)
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_web_stop_releases_permission_wait(workdir):
+    state = WebState(permission_timeout=10)
+    state.agent, _ = make_agent(
+        [[("bash", {"command": "rm nonexistent"})], "never reached"],
+        workdir,
+        ask=state.ask_user,
+        should_stop=state.cancelled,
+    )
+    events = state.subscribe()
+    token = "test-token"
+    server = make_server(state, token)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_port}"
+
+    try:
+        assert _post(base_url, token, "/api/run", {"prompt": "delete"})[0] == 202
+        _next(events, "permission_request")
+        assert _post(base_url, token, "/api/stop", {}) == (202, {"ok": True})
+        assert _next(events, "done")["stopped_reason"] == "cancelled"
+        assert state.snapshot()["permissions"] == []
+    finally:
+        state.unsubscribe(events)
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
 def test_web_api_rejects_missing_token():
     state = WebState()
     server = make_server(state, "secret")

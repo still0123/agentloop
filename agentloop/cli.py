@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 from .agent import Agent
@@ -47,6 +48,7 @@ def build_default_agent(
     workdir: Path,
     verbose_tools: bool = True,
     ask_user: AskUser | None = None,
+    should_stop: Callable[[], bool] | None = None,
 ) -> Agent:
     client = build_client()
 
@@ -59,7 +61,7 @@ def build_default_agent(
     if fallbacks:
         client = FallbackClient([client, *(_build_named(m) for m in fallbacks)])
 
-    toolbox, _todo = build_toolbox(workdir)
+    toolbox, _todo = build_toolbox(workdir, should_stop=should_stop)
     hooks = HookRegistry()
     hooks.register("PreToolUse", PermissionGate(ask_user=ask_user).as_hook())
     if verbose_tools:
@@ -86,7 +88,14 @@ def build_default_agent(
         "After running verification commands, state the command and its exit code "
         "explicitly in your reply."
     )
-    return Agent(client, toolbox, hooks, compactor, system_prompt)
+    return Agent(
+        client,
+        toolbox,
+        hooks,
+        compactor,
+        system_prompt,
+        should_stop=should_stop,
+    )
 
 
 def _build_named(model: str):

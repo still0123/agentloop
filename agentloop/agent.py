@@ -21,6 +21,7 @@ from .hooks import HookRegistry
 from .tools import Toolbox
 
 EventCallback = Callable[[dict], None]
+StopCheck = Callable[[], bool]
 
 
 @dataclass
@@ -29,7 +30,7 @@ class RunResult:
     messages: list
     turns: int
     usage: dict = field(default_factory=lambda: {"input_tokens": 0, "output_tokens": 0})
-    stopped_reason: str = "done"  # done | max_turns
+    stopped_reason: str = "done"  # done | max_turns | cancelled
 
 
 class Agent:
@@ -42,6 +43,7 @@ class Agent:
         system_prompt: str,
         max_turns: int = 40,
         reactive_retries: int = 1,
+        should_stop: StopCheck | None = None,
     ) -> None:
         self.client = client
         self.toolbox = toolbox
@@ -50,6 +52,7 @@ class Agent:
         self.system_prompt = system_prompt
         self.max_turns = max_turns
         self.reactive_retries = reactive_retries
+        self.should_stop = should_stop or (lambda: False)
 
     def run(
         self,
@@ -91,6 +94,8 @@ class Agent:
         todo_gap = 0  # 连续多少轮工具调用没碰过 todo_write
 
         while True:
+            if self.should_stop():
+                return _cancelled_result(messages, turns, usage, emit)
             messages = self.compactor.prepare(messages)
             emit({"type": "model_start", "turn": turns + 1})
 
@@ -110,6 +115,8 @@ class Agent:
             for key in usage:
                 usage[key] += response.usage.get(key, 0)
             turns += 1
+            if self.should_stop():
+                return _cancelled_result(messages, turns, usage, emit)
             messages.append({"role": "assistant", "content": response.blocks})
             if response.text:
                 emit(
@@ -165,7 +172,10 @@ class Agent:
 
             results = []
             used_todo = any(b.get("name") == "todo_write" for b in tool_calls)
-            for block in tool_calls:
+            for index, block in enumerate(tool_calls):
+                if self.should_stop():
+                    _append_cancelled_tools(messages, results, tool_calls[index:], emit)
+                    return _cancelled_result(messages, turns, usage, emit)
                 emit(
                     {
                         "type": "tool_call",
@@ -175,6 +185,9 @@ class Agent:
                     }
                 )
                 blocked = self.hooks.trigger("PreToolUse", block)
+                if self.should_stop():
+                    _append_cancelled_tools(messages, results, tool_calls[index:], emit)
+                    return _cancelled_result(messages, turns, usage, emit)
                 if blocked is not None:
                     # 拒绝原因作为 tool_result 返回——模型看得到，可以改道
                     result_block = {
@@ -211,6 +224,11 @@ class Agent:
                         "blocked": False,
                     }
                 )
+                if self.should_stop():
+                    _append_cancelled_tools(
+                        messages, results, tool_calls[index + 1 :], emit
+                    )
+                    return _cancelled_result(messages, turns, usage, emit)
 
             # s05 reminder：连续 3 轮没更新计划，把提醒拍在结果后面
             todo_gap = 0 if used_todo else todo_gap + 1
@@ -224,6 +242,56 @@ class Agent:
                 todo_gap = 0
 
             messages.append({"role": "user", "content": results})
+
+
+def _append_cancelled_tools(
+    messages: list, results: list, pending: list, emit: EventCallback
+) -> None:
+    for block in pending:
+        content = "Error: cancelled by user"
+        results.append(
+            {
+                "type": "tool_result",
+                "tool_use_id": block["id"],
+                "content": content,
+            }
+        )
+        emit(
+            {
+                "type": "tool_result",
+                "id": block["id"],
+                "name": block["name"],
+                "content": content,
+                "blocked": False,
+                "cancelled": True,
+            }
+        )
+    if results:
+        messages.append({"role": "user", "content": results})
+
+
+def _cancelled_result(
+    messages: list, turns: int, usage: dict, emit: EventCallback
+) -> RunResult:
+    text = "(cancelled by user)"
+    messages.append({"role": "assistant", "content": [{"type": "text", "text": text}]})
+    result = RunResult(
+        text=text,
+        messages=messages,
+        turns=turns,
+        usage=usage,
+        stopped_reason="cancelled",
+    )
+    emit(
+        {
+            "type": "done",
+            "text": result.text,
+            "turns": result.turns,
+            "usage": dict(result.usage),
+            "stopped_reason": result.stopped_reason,
+        }
+    )
+    return result
 
 
 def _is_prompt_too_long(exc: Exception) -> bool:
