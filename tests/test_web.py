@@ -105,6 +105,7 @@ def test_web_stop_cancels_running_bash(workdir):
         assert _post(base_url, token, "/api/run", {"prompt": "wait"})[0] == 202
         assert _next(events, "tool_call")["name"] == "bash"
         assert _post(base_url, token, "/api/stop", {}) == (202, {"ok": True})
+        assert _next(events, "tool_result")["cancelled"] is True
         done = _next(events, "done")
         assert done["stopped_reason"] == "cancelled"
         assert state.snapshot()["active"] is False

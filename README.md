@@ -77,6 +77,15 @@ python -m agentloop "列出当前目录中的 Python 文件"
 python -m agentloop
 ```
 
+本地 Web UI：
+
+```bash
+agentloop web
+```
+
+Web 会话按工作区自动保存。运行中可点击“停止”取消任务；正在执行的 `bash`
+命令会终止整个子进程组。
+
 不配置模型也能运行全部离线测试：
 
 ```bash
@@ -138,12 +147,13 @@ sequenceDiagram
 | 上下文压缩 | 转存、归档、占位、摘要四级管线 | [`compact.py`](agentloop/compact.py) |
 | 模型路由 | OpenAI 兼容协议、Anthropic 原生协议、Mock、Fallback | [`models.py`](agentloop/models.py) |
 | CLI | 单次任务、保留历史的 REPL、token 统计 | [`cli.py`](agentloop/cli.py) |
+| Web UI | SSE 事件、权限审批、会话持久化、任务取消 | [`web.py`](agentloop/web.py) |
 
 ### 内置工具
 
 | 工具 | 用途 | 保护措施 |
 |---|---|---|
-| `bash` | 执行 shell 命令 | 超时、输出截断、权限 Hook |
+| `bash` | 执行 shell 命令 | 超时、取消、输出截断、权限 Hook |
 | `read_file` | 读取文本文件 | 工作区路径限制 |
 | `write_file` | 创建或覆盖文件 | 工作区路径限制 |
 | `edit_file` | 精确替换首个匹配 | 工作区路径限制 |

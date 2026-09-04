@@ -208,6 +208,7 @@ class Agent:
                     continue
                 output = self.toolbox.execute(block)
                 self.hooks.trigger("PostToolUse", block, output)
+                cancelled = self.should_stop()
                 results.append(
                     {
                         "type": "tool_result",
@@ -222,9 +223,10 @@ class Agent:
                         "name": block["name"],
                         "content": output,
                         "blocked": False,
+                        "cancelled": cancelled,
                     }
                 )
-                if self.should_stop():
+                if cancelled:
                     _append_cancelled_tools(
                         messages, results, tool_calls[index + 1 :], emit
                     )
