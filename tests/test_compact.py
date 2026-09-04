@@ -6,10 +6,16 @@ from agentloop.models import MockClient
 
 def _pair(tid, result_text):
     return (
-        {"role": "assistant",
-         "content": [{"type": "tool_use", "id": tid, "name": "bash", "input": {}}]},
-        {"role": "user",
-         "content": [{"type": "tool_result", "tool_use_id": tid, "content": result_text}]},
+        {
+            "role": "assistant",
+            "content": [{"type": "tool_use", "id": tid, "name": "bash", "input": {}}],
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": tid, "content": result_text}
+            ],
+        },
     )
 
 
@@ -23,7 +29,9 @@ def _assert_pairing_intact(messages):
 
 
 def test_spill_writes_disk_and_keeps_path(workdir):
-    compactor = Compactor(workdir, client=None, batch_budget=20_000, spill_threshold=30_000)
+    compactor = Compactor(
+        workdir, client=None, batch_budget=20_000, spill_threshold=30_000
+    )
     messages = [{"role": "user", "content": "q"}, *_pair("t1", "x" * 40_000)]
     out = compactor.prepare(messages)
     content = out[-1]["content"][0]["content"]
@@ -34,7 +42,9 @@ def test_spill_writes_disk_and_keeps_path(workdir):
 
 
 def test_spill_skips_when_under_budget(workdir):
-    compactor = Compactor(workdir, client=None, batch_budget=200_000, spill_threshold=30_000)
+    compactor = Compactor(
+        workdir, client=None, batch_budget=200_000, spill_threshold=30_000
+    )
     messages = [{"role": "user", "content": "q"}, *_pair("t1", "x" * 40_000)]
     out = compactor.prepare(messages)
     assert out[-1]["content"][0]["content"] == "x" * 40_000
@@ -64,7 +74,8 @@ def test_snip_head_boundary_protects_pair(workdir):
         {"role": "assistant", "content": "thinking"},
         *_pair("t1", "r1"),  # 落在 index 2/3，head_end=3 正好切在中间
     ] + [
-        {"role": "assistant" if i % 2 else "user", "content": f"f{i}"} for i in range(55)
+        {"role": "assistant" if i % 2 else "user", "content": f"f{i}"}
+        for i in range(55)
     ]
     out = compactor._snip(messages)
     _assert_pairing_intact(out)
@@ -84,21 +95,22 @@ def test_snip_tail_boundary_protects_pair(workdir):
     _assert_pairing_intact(out)
     # 该配对必须整体保留在尾部
     assert any(
-        isinstance(m.get("content"), list) and any(
-            b.get("tool_use_id") == "t9" for b in m["content"]
-        )
+        isinstance(m.get("content"), list)
+        and any(b.get("tool_use_id") == "t9" for b in m["content"])
         for m in out
     )
 
 
 def test_placeholder_replaces_old_but_not_new(workdir):
-    compactor = Compactor(workdir, client=None, keep_recent_results=1, placeholder_limit=100)
+    compactor = Compactor(
+        workdir, client=None, keep_recent_results=1, placeholder_limit=100
+    )
     messages = (
         [{"role": "user", "content": "q"}]
         + list(_pair("t1", "a" * 300))
         + list(_pair("t2", "b" * 300))
-        + list(_pair("t3", "c" * 300))   # 最近一条已读 → 保留
-        + list(_pair("t4", "d" * 500))   # 最新批次（未读）→ 必须完整
+        + list(_pair("t3", "c" * 300))  # 最近一条已读 → 保留
+        + list(_pair("t4", "d" * 500))  # 最新批次（未读）→ 必须完整
     )
     out = compactor.prepare(messages)
     contents = [
@@ -115,7 +127,9 @@ def test_placeholder_replaces_old_but_not_new(workdir):
 
 
 def test_placeholder_keeps_spill_path(workdir):
-    compactor = Compactor(workdir, client=None, keep_recent_results=0, placeholder_limit=100)
+    compactor = Compactor(
+        workdir, client=None, keep_recent_results=0, placeholder_limit=100
+    )
     marked = "head\n\nFull output: .task_outputs/tool-results/t0.txt\n" + "x" * 200
     messages = [
         {"role": "user", "content": "q"},
@@ -160,7 +174,8 @@ def test_summarize_skipped_under_limit(workdir):
 def test_reactive_compact_keeps_recent(workdir):
     compactor = Compactor(workdir, client=MockClient(["REACTIVE"]))
     messages = [{"role": "user", "content": "q"}] + [
-        {"role": "assistant" if i % 2 else "user", "content": f"m{i}"} for i in range(12)
+        {"role": "assistant" if i % 2 else "user", "content": f"m{i}"}
+        for i in range(12)
     ]
     out = compactor.reactive_compact(messages)
     assert out[0]["content"].startswith("[Reactive compact]")

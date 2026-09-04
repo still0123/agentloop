@@ -13,8 +13,17 @@ def test_write_read_roundtrip(workdir):
 
 def test_read_limit(workdir):
     box, _ = build_toolbox(workdir)
-    _run(box, "write_file", path="n.txt", content="\n".join(f"line{i}" for i in range(10)))
-    assert _run(box, "read_file", path="n.txt", limit=3).splitlines() == ["line0", "line1", "line2"]
+    _run(
+        box,
+        "write_file",
+        path="n.txt",
+        content="\n".join(f"line{i}" for i in range(10)),
+    )
+    assert _run(box, "read_file", path="n.txt", limit=3).splitlines() == [
+        "line0",
+        "line1",
+        "line2",
+    ]
 
 
 def test_edit_replaces_first_occurrence(workdir):
@@ -28,7 +37,9 @@ def test_edit_replaces_first_occurrence(workdir):
 def test_edit_missing_text_returns_error(workdir):
     box, _ = build_toolbox(workdir)
     _run(box, "write_file", path="e.txt", content="hello")
-    assert _run(box, "edit_file", path="e.txt", old_text="nope", new_text="x").startswith("Error:")
+    assert _run(
+        box, "edit_file", path="e.txt", old_text="nope", new_text="x"
+    ).startswith("Error:")
 
 
 def test_path_escape_is_blocked(workdir):
@@ -85,13 +96,16 @@ def test_toolbox_rejects_duplicate_names(workdir):
 
 # ---------------------------------------------------------------------------
 
+
 def test_todo_render_marks():
     todo = TodoManager()
-    out = todo.update([
-        {"content": "step one", "status": "completed"},
-        {"content": "step two", "status": "in_progress"},
-        {"content": "step three", "status": "pending"},
-    ])
+    out = todo.update(
+        [
+            {"content": "step one", "status": "completed"},
+            {"content": "step two", "status": "in_progress"},
+            {"content": "step three", "status": "pending"},
+        ]
+    )
     assert "[x] step one" in out
     assert "[>] step two" in out
     assert "[ ] step three" in out
@@ -100,10 +114,12 @@ def test_todo_render_marks():
 def test_todo_only_one_in_progress():
     todo = TodoManager()
     try:
-        todo.update([
-            {"content": "a", "status": "in_progress"},
-            {"content": "b", "status": "in_progress"},
-        ])
+        todo.update(
+            [
+                {"content": "a", "status": "in_progress"},
+                {"content": "b", "status": "in_progress"},
+            ]
+        )
     except ValueError as exc:
         assert "in_progress" in str(exc)
     else:

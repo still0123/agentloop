@@ -13,7 +13,7 @@
 
 from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Callable
 
 # 闸门 1：无条件禁止。宁可误伤，不可放过。
 DENY_PATTERNS = (

@@ -26,13 +26,15 @@ def make_agent(
     hooks = HookRegistry()
     hooks.register("PreToolUse", PermissionGate(ask_user=ask or allow_all).as_hook())
 
-    kwargs = {"char_limit": 10 ** 12}
+    kwargs = {"char_limit": 10**12}
     if compactor_kwargs:
         kwargs.update(compactor_kwargs)
     # 摘要客户端独立于主 mock，避免吃掉对话脚本
     compactor = Compactor(workdir, client=MockClient(["(summary)"]), **kwargs)
 
-    agent = Agent(mock, toolbox, hooks, compactor, system_prompt="test", max_turns=max_turns)
+    agent = Agent(
+        mock, toolbox, hooks, compactor, system_prompt="test", max_turns=max_turns
+    )
     return agent, mock
 
 

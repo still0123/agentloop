@@ -109,7 +109,9 @@ class Compactor:
         if total <= self.batch_budget:
             return messages
         # 从最大的开始转存：同样的预算腾出最多空间
-        for block in sorted(blocks, key=lambda b: len(_str(b.get("content"))), reverse=True):
+        for block in sorted(
+            blocks, key=lambda b: len(_str(b.get("content"))), reverse=True
+        ):
             if total <= self.batch_budget:
                 break
             text = _str(block.get("content"))
@@ -121,7 +123,9 @@ class Compactor:
             abs_path.parent.mkdir(parents=True, exist_ok=True)
             abs_path.write_text(text, encoding="utf-8")
             # 留预览 + "Full output: 路径" 标记——③ 的占位符靠这行找回内容
-            block["content"] = text[: self.spill_preview] + f"\n\nFull output: {rel_path}"
+            block["content"] = (
+                text[: self.spill_preview] + f"\n\nFull output: {rel_path}"
+            )
             total = sum(len(_str(b.get("content"))) for b in blocks)
         return messages
 
@@ -175,7 +179,7 @@ class Compactor:
             saved = None
             for line in text.splitlines():
                 if line.startswith("Full output: "):
-                    saved = line[len("Full output: "):].strip()
+                    saved = line[len("Full output: ") :].strip()
                     break
             block["content"] = (
                 f"[Earlier tool result saved at {saved}]"
@@ -191,14 +195,16 @@ class Compactor:
         transcript = self._write_transcript(messages)
         summary = self._ask_summary(messages)
         first_request = self._first_request(messages)
-        return [{
-            "role": "user",
-            "content": (
-                f"[Compacted] Current user request:\n{first_request}\n\n"
-                f"Conversation summary:\n{summary}\n\n"
-                f"Full transcript: {transcript}"
-            ),
-        }]
+        return [
+            {
+                "role": "user",
+                "content": (
+                    f"[Compacted] Current user request:\n{first_request}\n\n"
+                    f"Conversation summary:\n{summary}\n\n"
+                    f"Full transcript: {transcript}"
+                ),
+            }
+        ]
 
     def reactive_compact(self, messages: list) -> list:
         """API 已经拒绝（prompt_too_long）后的补救：摘要旧历史 + 保留最近几条。"""
@@ -250,11 +256,16 @@ class Compactor:
                     if kind == "text":
                         lines.append(f"{role}(text): {b.get('text', '')}")
                     elif kind == "tool_use":
-                        lines.append(f"{role}(tool_use): {b.get('name')} {json.dumps(b.get('input', {}), ensure_ascii=False)}")
+                        tool_input = json.dumps(b.get("input", {}), ensure_ascii=False)
+                        lines.append(f"{role}(tool_use): {b.get('name')} {tool_input}")
                     elif kind == "tool_result":
-                        lines.append(f"{role}(tool_result): {_str(b.get('content'))[:300]}")
+                        lines.append(
+                            f"{role}(tool_result): {_str(b.get('content'))[:300]}"
+                        )
         text = "\n".join(lines)
-        return text[:cap] + (f"\n... (truncated at {cap} chars)" if len(text) > cap else "")
+        return text[:cap] + (
+            f"\n... (truncated at {cap} chars)" if len(text) > cap else ""
+        )
 
     @staticmethod
     def _first_request(messages: list) -> str:
@@ -288,4 +299,8 @@ class Compactor:
 
 
 def _str(content) -> str:
-    return content if isinstance(content, str) else json.dumps(content, ensure_ascii=False, default=str)
+    return (
+        content
+        if isinstance(content, str)
+        else json.dumps(content, ensure_ascii=False, default=str)
+    )

@@ -37,9 +37,7 @@ def test_user_prompt_submit_can_replace_input(workdir):
 
 def test_post_tool_use_observes_output(workdir):
     seen = []
-    agent, _ = make_agent(
-        [[("bash", {"command": "echo observable"})], "done"], workdir
-    )
+    agent, _ = make_agent([[("bash", {"command": "echo observable"})], "done"], workdir)
     agent.hooks.register("PostToolUse", lambda block, out: seen.append(out) or None)
     agent.run("echo something")
     assert seen and "observable" in seen[0]

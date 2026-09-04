@@ -12,9 +12,9 @@ from __future__ import annotations
 
 import glob as globlib
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 MAX_TOOL_OUTPUT = 200_000  # 超长输出截断；更大的交给压缩管线的转存机制
 
@@ -41,7 +41,9 @@ class Toolbox:
     def __init__(self) -> None:
         self._tools: dict[str, ToolDef] = {}
 
-    def add(self, name: str, description: str, input_schema: dict, handler: Callable) -> None:
+    def add(
+        self, name: str, description: str, input_schema: dict, handler: Callable
+    ) -> None:
         if name in self._tools:
             raise ValueError(f"duplicate tool name: {name}")
         self._tools[name] = ToolDef(name, description, input_schema, handler)
@@ -50,7 +52,11 @@ class Toolbox:
     def defs(self) -> list[dict]:
         """给模型看的工具定义（每轮组装进请求）。"""
         return [
-            {"name": t.name, "description": t.description, "input_schema": t.input_schema}
+            {
+                "name": t.name,
+                "description": t.description,
+                "input_schema": t.input_schema,
+            }
             for t in self._tools.values()
         ]
 
@@ -73,6 +79,7 @@ class Toolbox:
 # ---------------------------------------------------------------------------
 # TodoManager（s05）：规划能力，不是执行能力
 # ---------------------------------------------------------------------------
+
 
 class TodoManager:
     """内存中的计划清单。约束：≤20 项、内容非空、同时最多一个 in_progress。"""
@@ -98,7 +105,9 @@ class TodoManager:
             if not content:
                 raise ValueError("todo item content must be non-empty")
             if status not in self.STATUSES:
-                raise ValueError(f"invalid status {status!r}, expected one of {self.STATUSES}")
+                raise ValueError(
+                    f"invalid status {status!r}, expected one of {self.STATUSES}"
+                )
             validated.append({"content": content, "status": status})
         if sum(1 for i in validated if i["status"] == "in_progress") > 1:
             raise ValueError("only one todo item can be in_progress at a time")
@@ -117,6 +126,7 @@ class TodoManager:
 # 工具箱组装
 # ---------------------------------------------------------------------------
 
+
 def build_toolbox(workdir: Path):
     """返回 (Toolbox, TodoManager)。workdir 由调用方钉死，工具闭包引用它。"""
     workdir = Path(workdir)
@@ -127,7 +137,10 @@ def build_toolbox(workdir: Path):
         try:
             proc = subprocess.run(
                 ["bash", "-c", command],
-                capture_output=True, text=True, timeout=timeout, cwd=str(workdir),
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                cwd=str(workdir),
             )
         except subprocess.TimeoutExpired:
             return f"Error: command timed out after {timeout}s"
@@ -138,7 +151,9 @@ def build_toolbox(workdir: Path):
             parts.append("[stderr]\n" + proc.stderr)
         text = "\n".join(parts)
         if len(text) > MAX_TOOL_OUTPUT:
-            text = text[:MAX_TOOL_OUTPUT] + f"\n... (truncated, {len(text)} chars total)"
+            text = (
+                text[:MAX_TOOL_OUTPUT] + f"\n... (truncated, {len(text)} chars total)"
+            )
         return text
 
     def run_read(path: str, limit: int | None = None) -> str:
@@ -176,50 +191,85 @@ def build_toolbox(workdir: Path):
         return output
 
     box.add(
-        "bash", "Run a shell command in the workspace and return exit code and output.",
-        {"type": "object",
-         "properties": {"command": {"type": "string"}, "timeout": {"type": "integer"}},
-         "required": ["command"]},
+        "bash",
+        "Run a shell command in the workspace and return exit code and output.",
+        {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string"},
+                "timeout": {"type": "integer"},
+            },
+            "required": ["command"],
+        },
         run_bash,
     )
     box.add(
-        "read_file", "Read a text file inside the workspace.",
-        {"type": "object",
-         "properties": {"path": {"type": "string"}, "limit": {"type": "integer"}},
-         "required": ["path"]},
+        "read_file",
+        "Read a text file inside the workspace.",
+        {
+            "type": "object",
+            "properties": {"path": {"type": "string"}, "limit": {"type": "integer"}},
+            "required": ["path"],
+        },
         run_read,
     )
     box.add(
-        "write_file", "Create or overwrite a text file inside the workspace.",
-        {"type": "object",
-         "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
-         "required": ["path", "content"]},
+        "write_file",
+        "Create or overwrite a text file inside the workspace.",
+        {
+            "type": "object",
+            "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+            "required": ["path", "content"],
+        },
         run_write,
     )
     box.add(
-        "edit_file", "Replace the first occurrence of old_text with new_text in a file.",
-        {"type": "object",
-         "properties": {"path": {"type": "string"},
-                        "old_text": {"type": "string"},
-                        "new_text": {"type": "string"}},
-         "required": ["path", "old_text", "new_text"]},
+        "edit_file",
+        "Replace the first occurrence of old_text with new_text in a file.",
+        {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "old_text": {"type": "string"},
+                "new_text": {"type": "string"},
+            },
+            "required": ["path", "old_text", "new_text"],
+        },
         run_edit,
     )
     box.add(
-        "glob", "Find files by glob pattern, e.g. '**/*.py'.",
-        {"type": "object",
-         "properties": {"pattern": {"type": "string"}},
-         "required": ["pattern"]},
+        "glob",
+        "Find files by glob pattern, e.g. '**/*.py'.",
+        {
+            "type": "object",
+            "properties": {"pattern": {"type": "string"}},
+            "required": ["pattern"],
+        },
         run_glob,
     )
     box.add(
-        "todo_write", "Create or replace the session todo list. Plan before executing multi-step tasks.",
-        {"type": "object",
-         "properties": {"todos": {"type": "array", "items": {"type": "object", "properties": {
-             "content": {"type": "string"},
-             "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]},
-         }}}},
-         "required": ["todos"]},
+        "todo_write",
+        "Create or replace the session todo list. "
+        "Plan before executing multi-step tasks.",
+        {
+            "type": "object",
+            "properties": {
+                "todos": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "content": {"type": "string"},
+                            "status": {
+                                "type": "string",
+                                "enum": ["pending", "in_progress", "completed"],
+                            },
+                        },
+                    },
+                }
+            },
+            "required": ["todos"],
+        },
         run_todo,
     )
     return box, todo

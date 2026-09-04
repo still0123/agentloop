@@ -19,7 +19,6 @@
 from __future__ import annotations
 
 import json
-import os
 import time
 from dataclasses import dataclass, field
 
@@ -30,7 +29,8 @@ class ModelResponse:
 
     text: str = ""
     blocks: list = field(default_factory=list)
-    usage: dict = field(default_factory=dict)  # {"input_tokens": int, "output_tokens": int}
+    # {"input_tokens": int, "output_tokens": int}
+    usage: dict = field(default_factory=dict)
 
 
 class ModelError(RuntimeError):
@@ -45,6 +45,7 @@ class RetryableModelError(ModelError):
 # 内部格式 → OpenAI 线格式的转换
 # ---------------------------------------------------------------------------
 
+
 def _openai_wire_messages(system: str, messages: list) -> list:
     wire = [{"role": "system", "content": system}]
     for msg in messages:
@@ -53,7 +54,9 @@ def _openai_wire_messages(system: str, messages: list) -> list:
             wire.append({"role": role, "content": content})
             continue
         if role == "assistant":
-            text = "".join(b.get("text", "") for b in content if b.get("type") == "text")
+            text = "".join(
+                b.get("text", "") for b in content if b.get("type") == "text"
+            )
             entry = {"role": "assistant", "content": text}
             calls = [
                 {
@@ -90,7 +93,11 @@ def _openai_wire_messages(system: str, messages: list) -> list:
 
 
 def _stringify(content) -> str:
-    return content if isinstance(content, str) else json.dumps(content, ensure_ascii=False, default=str)
+    return (
+        content
+        if isinstance(content, str)
+        else json.dumps(content, ensure_ascii=False, default=str)
+    )
 
 
 class OpenAICompatClient:
@@ -98,8 +105,15 @@ class OpenAICompatClient:
 
     adapter = "openai-compat"
 
-    def __init__(self, model: str, base_url: str, api_key: str,
-                 max_tokens: int = 8000, timeout: float = 120.0, retries: int = 3) -> None:
+    def __init__(
+        self,
+        model: str,
+        base_url: str,
+        api_key: str,
+        max_tokens: int = 8000,
+        timeout: float = 120.0,
+        retries: int = 3,
+    ) -> None:
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
@@ -138,7 +152,9 @@ class OpenAICompatClient:
             try:
                 resp = httpx.post(
                     f"{self.base_url}/chat/completions",
-                    json=payload, headers=headers, timeout=self.timeout,
+                    json=payload,
+                    headers=headers,
+                    timeout=self.timeout,
                 )
                 if resp.status_code in (429, 500, 502, 503, 529):
                     raise RetryableModelError(f"HTTP {resp.status_code}")
@@ -146,9 +162,13 @@ class OpenAICompatClient:
                     # 4xx（除 429）重试没有意义，直接失败（可能触发 Fallback）
                     raise ModelError(f"HTTP {resp.status_code}: {resp.text[:300]}")
                 return self._parse(resp.json())
-            except (RetryableModelError, httpx.TimeoutException, httpx.TransportError) as exc:
+            except (
+                RetryableModelError,
+                httpx.TimeoutException,
+                httpx.TransportError,
+            ) as exc:
                 last_error = exc
-                time.sleep(2 ** attempt)
+                time.sleep(2**attempt)
         raise ModelError(f"{self.model}: {self.retries} 次重试后仍失败: {last_error}")
 
     @staticmethod
@@ -166,8 +186,12 @@ class OpenAICompatClient:
             except json.JSONDecodeError:
                 parsed = {"_raw": raw_args}
             blocks.append(
-                {"type": "tool_use", "id": call["id"],
-                 "name": call["function"]["name"], "input": parsed}
+                {
+                    "type": "tool_use",
+                    "id": call["id"],
+                    "name": call["function"]["name"],
+                    "input": parsed,
+                }
             )
         usage = data.get("usage") or {}
         return ModelResponse(
@@ -185,8 +209,15 @@ class AnthropicClient:
 
     adapter = "anthropic"
 
-    def __init__(self, model: str, api_key: str, base_url: str = "https://api.anthropic.com",
-                 max_tokens: int = 8000, timeout: float = 120.0, retries: int = 3) -> None:
+    def __init__(
+        self,
+        model: str,
+        api_key: str,
+        base_url: str = "https://api.anthropic.com",
+        max_tokens: int = 8000,
+        timeout: float = 120.0,
+        retries: int = 3,
+    ) -> None:
         self.model = model
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
@@ -202,7 +233,9 @@ class AnthropicClient:
             "max_tokens": self.max_tokens,
             "system": system,
             # json 往返一趟：剥掉测试里可能混入的非序列化对象
-            "messages": json.loads(json.dumps(messages, ensure_ascii=False, default=str)),
+            "messages": json.loads(
+                json.dumps(messages, ensure_ascii=False, default=str)
+            ),
         }
         if tools:
             payload["tools"] = [
@@ -223,16 +256,22 @@ class AnthropicClient:
             try:
                 resp = httpx.post(
                     f"{self.base_url}/v1/messages",
-                    json=payload, headers=headers, timeout=self.timeout,
+                    json=payload,
+                    headers=headers,
+                    timeout=self.timeout,
                 )
                 if resp.status_code in (429, 500, 502, 503, 529):
                     raise RetryableModelError(f"HTTP {resp.status_code}")
                 if resp.status_code >= 400:
                     raise ModelError(f"HTTP {resp.status_code}: {resp.text[:300]}")
                 return self._parse(resp.json())
-            except (RetryableModelError, httpx.TimeoutException, httpx.TransportError) as exc:
+            except (
+                RetryableModelError,
+                httpx.TimeoutException,
+                httpx.TransportError,
+            ) as exc:
                 last_error = exc
-                time.sleep(2 ** attempt)
+                time.sleep(2**attempt)
         raise ModelError(f"{self.model}: {self.retries} 次重试后仍失败: {last_error}")
 
     @staticmethod
@@ -267,7 +306,14 @@ class MockClient:
 
     def complete(self, system: str, messages: list, tools: list) -> ModelResponse:
         import copy
-        self.calls.append({"system": system, "messages": copy.deepcopy(messages), "tools": list(tools)})
+
+        self.calls.append(
+            {
+                "system": system,
+                "messages": copy.deepcopy(messages),
+                "tools": list(tools),
+            }
+        )
         if not self.turns:
             text = "(mock script exhausted)"
             return ModelResponse(text=text, blocks=[{"type": "text", "text": text}])
@@ -279,10 +325,17 @@ class MockClient:
                 usage={"input_tokens": 10, "output_tokens": 5},
             )
         blocks = [
-            {"type": "tool_use", "id": f"toolu_{i:03d}", "name": name, "input": dict(args or {})}
+            {
+                "type": "tool_use",
+                "id": f"toolu_{i:03d}",
+                "name": name,
+                "input": dict(args or {}),
+            }
             for i, (name, args) in enumerate(turn)
         ]
-        return ModelResponse(blocks=blocks, usage={"input_tokens": 10, "output_tokens": 5})
+        return ModelResponse(
+            blocks=blocks, usage={"input_tokens": 10, "output_tokens": 5}
+        )
 
 
 class FallbackClient:
@@ -315,6 +368,7 @@ class FallbackClient:
 # 提供商档案与路由
 # ---------------------------------------------------------------------------
 
+
 @dataclass(frozen=True)
 class ProviderProfile:
     name: str
@@ -324,27 +378,45 @@ class ProviderProfile:
 
 
 PROFILES = {
-    "glm": ProviderProfile("glm", "https://open.bigmodel.cn/api/paas/v4",
-                           ("GLM_API_KEY", "ZHIPU_API_KEY"), "openai"),
-    "deepseek": ProviderProfile("deepseek", "https://api.deepseek.com",
-                                ("DEEPSEEK_API_KEY",), "openai"),
-    "qwen": ProviderProfile("qwen", "https://dashscope.aliyuncs.com/compatible-mode/v1",
-                            ("DASHSCOPE_API_KEY", "QWEN_API_KEY"), "openai"),
-    "moonshot": ProviderProfile("moonshot", "https://api.moonshot.cn/v1",
-                                ("MOONSHOT_API_KEY",), "openai"),
-    "openai": ProviderProfile("openai", "https://api.openai.com/v1",
-                              ("OPENAI_API_KEY",), "openai"),
-    "anthropic": ProviderProfile("anthropic", "https://api.anthropic.com",
-                                 ("ANTHROPIC_API_KEY",), "anthropic"),
+    "glm": ProviderProfile(
+        "glm",
+        "https://open.bigmodel.cn/api/paas/v4",
+        ("GLM_API_KEY", "ZHIPU_API_KEY"),
+        "openai",
+    ),
+    "deepseek": ProviderProfile(
+        "deepseek", "https://api.deepseek.com", ("DEEPSEEK_API_KEY",), "openai"
+    ),
+    "qwen": ProviderProfile(
+        "qwen",
+        "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        ("DASHSCOPE_API_KEY", "QWEN_API_KEY"),
+        "openai",
+    ),
+    "moonshot": ProviderProfile(
+        "moonshot", "https://api.moonshot.cn/v1", ("MOONSHOT_API_KEY",), "openai"
+    ),
+    "openai": ProviderProfile(
+        "openai", "https://api.openai.com/v1", ("OPENAI_API_KEY",), "openai"
+    ),
+    "anthropic": ProviderProfile(
+        "anthropic", "https://api.anthropic.com", ("ANTHROPIC_API_KEY",), "anthropic"
+    ),
 }
 
 _PREFIX_RULES = (
-    ("glm", "glm"), ("chatglm", "glm"),
+    ("glm", "glm"),
+    ("chatglm", "glm"),
     ("deepseek", "deepseek"),
-    ("qwen", "qwen"), ("qwq", "qwen"),
-    ("moonshot", "moonshot"), ("kimi", "moonshot"),
+    ("qwen", "qwen"),
+    ("qwq", "qwen"),
+    ("moonshot", "moonshot"),
+    ("kimi", "moonshot"),
     ("claude", "anthropic"),
-    ("gpt-", "openai"), ("o1", "openai"), ("o3", "openai"), ("o4", "openai"),
+    ("gpt-", "openai"),
+    ("o1", "openai"),
+    ("o3", "openai"),
+    ("o4", "openai"),
 )
 
 
@@ -370,6 +442,7 @@ def build_client(model: str | None = None, env: dict | None = None):
     显式 BASE_URL+API_KEY > AGENTLOOP_PROVIDER > 模型名前缀检测 > openai。
     """
     import os as _os
+
     if env is not None:  # 测试注入用
         get = env.get
     else:
@@ -392,17 +465,25 @@ def build_client(model: str | None = None, env: dict | None = None):
     max_tokens = int(get("AGENTLOOP_MAX_TOKENS", "8000"))
 
     if provider and provider not in PROFILES:
-        raise SystemExit(f"未知 AGENTLOOP_PROVIDER: {provider}，可选: {sorted(PROFILES)}")
+        raise SystemExit(
+            f"未知 AGENTLOOP_PROVIDER: {provider}，可选: {sorted(PROFILES)}"
+        )
 
     if provider == "anthropic":
         key = api_key or _first_env(PROFILES["anthropic"].api_key_envs, get)
         if not key:
             raise SystemExit("缺少 ANTHROPIC_API_KEY")
-        return AnthropicClient(model, key, base_url=base_url or PROFILES["anthropic"].base_url,
-                               max_tokens=max_tokens)
+        return AnthropicClient(
+            model,
+            key,
+            base_url=base_url or PROFILES["anthropic"].base_url,
+            max_tokens=max_tokens,
+        )
 
     if base_url:  # 自定义 OpenAI 兼容端点（Ollama 等本地服务常无鉴权）
-        return OpenAICompatClient(model, base_url, api_key or "EMPTY", max_tokens=max_tokens)
+        return OpenAICompatClient(
+            model, base_url, api_key or "EMPTY", max_tokens=max_tokens
+        )
 
     profile = PROFILES[provider or detect_provider(model) or "openai"]
     key = api_key or _first_env(profile.api_key_envs, get)
@@ -412,5 +493,7 @@ def build_client(model: str | None = None, env: dict | None = None):
         )
     # 前缀检测也必须尊重适配器类型，否则 claude-* 会误走 OpenAI 线协议。
     if profile.adapter == "anthropic":
-        return AnthropicClient(model, key, base_url=profile.base_url, max_tokens=max_tokens)
+        return AnthropicClient(
+            model, key, base_url=profile.base_url, max_tokens=max_tokens
+        )
     return OpenAICompatClient(model, profile.base_url, key, max_tokens=max_tokens)

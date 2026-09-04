@@ -2,9 +2,7 @@ from helpers import make_agent, tool_results
 
 
 def test_deny_list_hard_blocks(workdir):
-    agent, _ = make_agent(
-        [[("bash", {"command": "rm -rf /"})], "done"], workdir
-    )
+    agent, _ = make_agent([[("bash", {"command": "rm -rf /"})], "done"], workdir)
     result = agent.run("clean the machine")
     assert any("deny list" in r for r in tool_results(result.messages))
 

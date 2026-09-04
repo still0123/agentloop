@@ -1,3 +1,4 @@
+import pytest
 from helpers import make_agent, tool_results
 
 
@@ -10,9 +11,7 @@ def test_final_text_without_tools(workdir):
 
 
 def test_tool_roundtrip(workdir):
-    agent, mock = make_agent(
-        [[("bash", {"command": "echo hi"})], "done"], workdir
-    )
+    agent, mock = make_agent([[("bash", {"command": "echo hi"})], "done"], workdir)
     result = agent.run("run echo")
     assert result.text == "done"
     assert len(mock.calls) == 2
@@ -23,10 +22,13 @@ def test_tool_roundtrip(workdir):
 
 def test_multiple_tool_calls_execute_in_order(workdir):
     agent, _ = make_agent(
-        [[
-            ("write_file", {"path": "a.txt", "content": "A"}),
-            ("write_file", {"path": "b.txt", "content": "B"}),
-         ], "done"],
+        [
+            [
+                ("write_file", {"path": "a.txt", "content": "A"}),
+                ("write_file", {"path": "b.txt", "content": "B"}),
+            ],
+            "done",
+        ],
         workdir,
     )
     agent.run("write two files")
@@ -74,9 +76,7 @@ def test_todo_usage_resets_reminder(workdir):
 
 
 def test_usage_accumulates(workdir):
-    agent, _ = make_agent(
-        [[("bash", {"command": "echo x"})], "done"], workdir
-    )
+    agent, _ = make_agent([[("bash", {"command": "echo x"})], "done"], workdir)
     result = agent.run("q")
     assert result.usage["input_tokens"] == 20  # MockClient 每次固定 10
     assert result.usage["output_tokens"] == 10
@@ -97,3 +97,41 @@ def test_session_continuity(workdir):
     # 第二问的模型调用应看到第一问的完整历史
     assert len(mock.calls[1]["messages"]) > len(mock.calls[0]["messages"])
     assert second.messages[:2] == first.messages[:2]
+
+
+def test_event_callback_reports_tool_roundtrip(workdir):
+    events = []
+    agent, _ = make_agent([[("bash", {"command": "echo hi"})], "done"], workdir)
+
+    result = agent.run("run echo", on_event=events.append)
+
+    assert [event["type"] for event in events] == [
+        "run_start",
+        "model_start",
+        "tool_call",
+        "tool_result",
+        "model_start",
+        "assistant_message",
+        "done",
+    ]
+    assert events[2]["input"] == {"command": "echo hi"}
+    assert "exit=0" in events[3]["content"]
+    assert events[-1]["usage"] == result.usage
+
+
+def test_event_callback_reports_errors(workdir):
+    events = []
+    agent, mock = make_agent(["unused"], workdir)
+
+    def fail(*args):
+        raise RuntimeError("model unavailable")
+
+    mock.complete = fail
+    with pytest.raises(RuntimeError, match="model unavailable"):
+        agent.run("hi", on_event=events.append)
+
+    assert events[-1] == {
+        "type": "error",
+        "error": "RuntimeError",
+        "message": "model unavailable",
+    }

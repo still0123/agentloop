@@ -15,7 +15,7 @@ from .agent import Agent
 from .compact import Compactor
 from .hooks import HookRegistry
 from .models import FallbackClient, build_client
-from .permission import PermissionGate
+from .permission import AskUser, PermissionGate
 from .tools import build_toolbox
 
 
@@ -43,22 +43,39 @@ def _short(value) -> str:
     return text if len(text) <= 100 else text[:100] + "…"
 
 
-def build_default_agent(workdir: Path, verbose_tools: bool = True) -> Agent:
+def build_default_agent(
+    workdir: Path,
+    verbose_tools: bool = True,
+    ask_user: AskUser | None = None,
+) -> Agent:
     client = build_client()
 
     # 备用模型：AGENTLOOP_FALLBACK_MODELS="a,b"（可跨提供商）
-    fallbacks = [m.strip() for m in os.environ.get("AGENTLOOP_FALLBACK_MODELS", "").split(",") if m.strip()]
+    fallbacks = [
+        m.strip()
+        for m in os.environ.get("AGENTLOOP_FALLBACK_MODELS", "").split(",")
+        if m.strip()
+    ]
     if fallbacks:
         client = FallbackClient([client, *(_build_named(m) for m in fallbacks)])
 
     toolbox, _todo = build_toolbox(workdir)
     hooks = HookRegistry()
-    hooks.register("PreToolUse", PermissionGate().as_hook())
+    hooks.register("PreToolUse", PermissionGate(ask_user=ask_user).as_hook())
     if verbose_tools:
-        hooks.register("PreToolUse", lambda b: _dim(f"→ {b['name']}({_short(b.get('input', {}))})") or None)
+        hooks.register(
+            "PreToolUse",
+            lambda b: _dim(f"→ {b['name']}({_short(b.get('input', {}))})") or None,
+        )
         hooks.register(
             "PostToolUse",
-            lambda b, out: _dim(f"← {b['name']}: {str(out).splitlines()[0][:90] if out else '(empty)'}") or None,
+            lambda b, out: (
+                _dim(
+                    f"← {b['name']}: "
+                    f"{str(out).splitlines()[0][:90] if out else '(empty)'}"
+                )
+                or None
+            ),
         )
     compactor = Compactor(workdir, client=client)
 
@@ -87,6 +104,11 @@ def _build_named(model: str):
 
 def main(argv: list | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
+    if argv and argv[0] == "web":
+        from .web import main as web_main
+
+        return web_main(argv[1:])
+
     _load_dotenv()
     workdir = Path.cwd()
 
@@ -113,7 +135,12 @@ def main(argv: list | None = None) -> int:
             return 1
         _report(result)
         print(result.text)
-        _dim(f"\n[usage] turns=1  input_tokens={total_usage['input_tokens']}  output_tokens={total_usage['output_tokens']}")
+        input_tokens = total_usage["input_tokens"]
+        output_tokens = total_usage["output_tokens"]
+        _dim(
+            f"\n[usage] turns={result.turns}  input_tokens={input_tokens}  "
+            f"output_tokens={output_tokens}"
+        )
         return 0
 
     session: list = []

@@ -14,10 +14,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from .hooks import HookRegistry
 from .tools import Toolbox
+
+EventCallback = Callable[[dict], None]
 
 
 @dataclass
@@ -48,7 +51,31 @@ class Agent:
         self.max_turns = max_turns
         self.reactive_retries = reactive_retries
 
-    def run(self, user_input: str, messages: list | None = None) -> RunResult:
+    def run(
+        self,
+        user_input: str,
+        messages: list | None = None,
+        on_event: EventCallback | None = None,
+    ) -> RunResult:
+        emit = on_event or (lambda event: None)
+        try:
+            return self._run(user_input, messages, emit)
+        except Exception as exc:
+            try:
+                emit(
+                    {
+                        "type": "error",
+                        "error": type(exc).__name__,
+                        "message": str(exc),
+                    }
+                )
+            except Exception:
+                pass
+            raise
+
+    def _run(
+        self, user_input: str, messages: list | None, emit: EventCallback
+    ) -> RunResult:
         # UserPromptSubmit hook 可返回 str 替换输入（上下文注入的口子）
         replaced = self.hooks.trigger("UserPromptSubmit", user_input)
         if isinstance(replaced, str) and replaced:
@@ -56,6 +83,7 @@ class Agent:
 
         messages = list(messages) if messages else []
         messages.append({"role": "user", "content": user_input})
+        emit({"type": "run_start", "prompt": user_input})
 
         usage = {"input_tokens": 0, "output_tokens": 0}
         turns = 0
@@ -64,15 +92,15 @@ class Agent:
 
         while True:
             messages = self.compactor.prepare(messages)
+            emit({"type": "model_start", "turn": turns + 1})
 
             try:
                 response = self.client.complete(
                     self.system_prompt, messages, self.toolbox.defs
                 )
             except Exception as exc:  # 估算失误导致超限 → 补救一次
-                if (
-                    reactive_retries < self.reactive_retries
-                    and _is_prompt_too_long(exc)
+                if reactive_retries < self.reactive_retries and _is_prompt_too_long(
+                    exc
                 ):
                     messages = self.compactor.reactive_compact(messages)
                     reactive_retries += 1
@@ -83,59 +111,116 @@ class Agent:
                 usage[key] += response.usage.get(key, 0)
             turns += 1
             messages.append({"role": "assistant", "content": response.blocks})
+            if response.text:
+                emit(
+                    {
+                        "type": "assistant_message",
+                        "text": response.text,
+                        "turn": turns,
+                    }
+                )
 
-            tool_calls = [
-                b for b in response.blocks if b.get("type") == "tool_use"
-            ]
+            tool_calls = [b for b in response.blocks if b.get("type") == "tool_use"]
             if not tool_calls:
                 # 模型想停 → Stop hook 有最后一次否决权（返回 str 强制续跑）
                 force = self.hooks.trigger("Stop", messages)
                 if isinstance(force, str) and force:
                     messages.append({"role": "user", "content": force})
                     continue
-                return RunResult(
+                result = RunResult(
                     text=response.text or "(no text)",
                     messages=messages,
                     turns=turns,
                     usage=usage,
                 )
+                emit(
+                    {
+                        "type": "done",
+                        "text": result.text,
+                        "turns": result.turns,
+                        "usage": dict(result.usage),
+                        "stopped_reason": result.stopped_reason,
+                    }
+                )
+                return result
 
             if turns >= self.max_turns:
-                return RunResult(
+                result = RunResult(
                     text=f"(stopped: reached max_turns={self.max_turns})",
                     messages=messages,
                     turns=turns,
                     usage=usage,
                     stopped_reason="max_turns",
                 )
+                emit(
+                    {
+                        "type": "done",
+                        "text": result.text,
+                        "turns": result.turns,
+                        "usage": dict(result.usage),
+                        "stopped_reason": result.stopped_reason,
+                    }
+                )
+                return result
 
             results = []
             used_todo = any(b.get("name") == "todo_write" for b in tool_calls)
             for block in tool_calls:
+                emit(
+                    {
+                        "type": "tool_call",
+                        "id": block["id"],
+                        "name": block["name"],
+                        "input": dict(block.get("input", {})),
+                    }
+                )
                 blocked = self.hooks.trigger("PreToolUse", block)
                 if blocked is not None:
                     # 拒绝原因作为 tool_result 返回——模型看得到，可以改道
-                    results.append({
+                    result_block = {
                         "type": "tool_result",
                         "tool_use_id": block["id"],
                         "content": str(blocked),
-                    })
+                    }
+                    results.append(result_block)
+                    emit(
+                        {
+                            "type": "tool_result",
+                            "id": block["id"],
+                            "name": block["name"],
+                            "content": result_block["content"],
+                            "blocked": True,
+                        }
+                    )
                     continue
                 output = self.toolbox.execute(block)
                 self.hooks.trigger("PostToolUse", block, output)
-                results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block["id"],
-                    "content": output,
-                })
+                results.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": block["id"],
+                        "content": output,
+                    }
+                )
+                emit(
+                    {
+                        "type": "tool_result",
+                        "id": block["id"],
+                        "name": block["name"],
+                        "content": output,
+                        "blocked": False,
+                    }
+                )
 
             # s05 reminder：连续 3 轮没更新计划，把提醒拍在结果后面
             todo_gap = 0 if used_todo else todo_gap + 1
             if todo_gap >= 3:
-                results.append({
-                    "type": "text",
-                    "text": "<reminder>Update your todos.</reminder>",
-                })
+                results.append(
+                    {
+                        "type": "text",
+                        "text": "<reminder>Update your todos.</reminder>",
+                    }
+                )
                 todo_gap = 0
 
             messages.append({"role": "user", "content": results})
@@ -143,4 +228,8 @@ class Agent:
 
 def _is_prompt_too_long(exc: Exception) -> bool:
     text = str(exc).lower()
-    return "prompt_too_long" in text or "too many tokens" in text or "context length" in text
+    return (
+        "prompt_too_long" in text
+        or "too many tokens" in text
+        or "context length" in text
+    )

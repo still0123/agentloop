@@ -13,11 +13,27 @@ authors = [{ name = "AgentLoop contributors" }]
 keywords = ["agent", "llm", "coding-agent", "harness", "claude-code"]
 dependencies = ["httpx>=0.27"]
 
+[project.urls]
+Homepage = "https://github.com/still0123/agentloop"
+Repository = "https://github.com/still0123/agentloop"
+Issues = "https://github.com/still0123/agentloop/issues"
+
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "ruff>=0.8"]
 
 [project.scripts]
 agentloop = "agentloop.cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
