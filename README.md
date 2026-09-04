@@ -83,8 +83,9 @@ python -m agentloop
 agentloop web
 ```
 
-Web 会话按工作区自动保存，支持创建、切换、改名和删除。运行中可点击“停止”
-取消任务；正在执行的 `bash` 命令会终止整个子进程组。
+Web 会话按工作区自动保存，支持创建、切换、改名和删除，模型文本按 Token
+增量显示。运行中可点击“停止”取消任务；正在执行的 `bash` 命令会终止整个
+子进程组。
 
 不配置模型也能运行全部离线测试：
 
@@ -147,7 +148,7 @@ sequenceDiagram
 | 上下文压缩 | 转存、归档、占位、摘要四级管线 | [`compact.py`](agentloop/compact.py) |
 | 模型路由 | OpenAI 兼容协议、Anthropic 原生协议、Mock、Fallback | [`models.py`](agentloop/models.py) |
 | CLI | 单次任务、保留历史的 REPL、token 统计 | [`cli.py`](agentloop/cli.py) |
-| Web UI | SSE 事件、权限审批、多会话持久化、任务取消 | [`web.py`](agentloop/web.py) |
+| Web UI | Token 流式事件、权限审批、多会话持久化、任务取消 | [`web.py`](agentloop/web.py) |
 
 ### 内置工具
 
@@ -269,7 +270,7 @@ CI 使用 Python 3.10–3.13 矩阵执行同样的 Ruff 和 Pytest 检查。格�
 
 - 生产级 shell 沙箱；
 - Subagent、MCP、Skills、长期记忆和任务图；
-- Token 流式输出；
+- SSE 断线事件重放；
 - 多用户服务端数据库和远程访问；
 - 桌面安装包；
 - 多工具并发执行。

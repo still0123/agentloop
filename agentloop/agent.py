@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -60,9 +61,10 @@ class Agent:
         messages: list | None = None,
         on_event: EventCallback | None = None,
     ) -> RunResult:
+        stream_text = on_event is not None
         emit = on_event or (lambda event: None)
         try:
-            return self._run(user_input, messages, emit)
+            return self._run(user_input, messages, emit, stream_text)
         except Exception as exc:
             try:
                 emit(
@@ -77,7 +79,11 @@ class Agent:
             raise
 
     def _run(
-        self, user_input: str, messages: list | None, emit: EventCallback
+        self,
+        user_input: str,
+        messages: list | None,
+        emit: EventCallback,
+        stream_text: bool,
     ) -> RunResult:
         # UserPromptSubmit hook 可返回 str 替换输入（上下文注入的口子）
         replaced = self.hooks.trigger("UserPromptSubmit", user_input)
@@ -97,12 +103,33 @@ class Agent:
             if self.should_stop():
                 return _cancelled_result(messages, turns, usage, emit)
             messages = self.compactor.prepare(messages)
-            emit({"type": "model_start", "turn": turns + 1})
+            turn = turns + 1
+            emit({"type": "model_start", "turn": turn})
+            streamed = False
+
+            def on_text(delta: str, event_turn: int = turn) -> None:
+                nonlocal streamed
+                streamed = True
+                emit(
+                    {
+                        "type": "assistant_delta",
+                        "text": delta,
+                        "turn": event_turn,
+                    }
+                )
 
             try:
-                response = self.client.complete(
-                    self.system_prompt, messages, self.toolbox.defs
-                )
+                if stream_text and _supports_text_stream(self.client.complete):
+                    response = self.client.complete(
+                        self.system_prompt,
+                        messages,
+                        self.toolbox.defs,
+                        on_text=on_text,
+                    )
+                else:
+                    response = self.client.complete(
+                        self.system_prompt, messages, self.toolbox.defs
+                    )
             except Exception as exc:  # 估算失误导致超限 → 补救一次
                 if self.should_stop():
                     return _cancelled_result(messages, turns, usage, emit)
@@ -126,6 +153,7 @@ class Agent:
                         "type": "assistant_message",
                         "text": response.text,
                         "turn": turns,
+                        "streamed": streamed,
                     }
                 )
 
@@ -304,4 +332,12 @@ def _is_prompt_too_long(exc: Exception) -> bool:
         "prompt_too_long" in text
         or "too many tokens" in text
         or "context length" in text
+    )
+
+
+def _supports_text_stream(callback) -> bool:
+    parameters = inspect.signature(callback).parameters.values()
+    return any(
+        parameter.name == "on_text" or parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters
     )

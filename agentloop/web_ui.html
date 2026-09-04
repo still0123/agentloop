@@ -591,6 +591,7 @@
   const tools = new Map();
   let activePermission = null;
   let activeSessionId = null;
+  let streamingMessage = null;
   let sessions = [];
   let running = false;
 
@@ -628,6 +629,7 @@
     row.append(label, content);
     timeline.append(row);
     scrollToEnd();
+    return content;
   }
 
   function addTool(event) {
@@ -682,6 +684,7 @@
   function clearSessionView() {
     timeline.replaceChildren();
     tools.clear();
+    streamingMessage = null;
     usage.textContent = "";
   }
 
@@ -872,10 +875,23 @@
         }
         break;
       case "model_start":
+        streamingMessage = null;
         setStatus(`思考中 · 第 ${event.turn} 轮`, "busy");
         break;
+      case "assistant_delta":
+        if (!streamingMessage) {
+          streamingMessage = addMessage("Agent", "");
+        }
+        streamingMessage.textContent += event.text;
+        scrollToEnd();
+        break;
       case "assistant_message":
-        addMessage("Agent", event.text);
+        if (event.streamed && streamingMessage) {
+          streamingMessage.textContent = event.text;
+        } else {
+          addMessage("Agent", event.text);
+        }
+        streamingMessage = null;
         break;
       case "tool_call":
         setStatus(`执行 ${event.name}`, "busy");
@@ -896,6 +912,7 @@
         setStatus("运行中", "busy");
         break;
       case "done":
+        streamingMessage = null;
         setRunning(false);
         setStatus(event.stopped_reason === "cancelled" ? "已停止" : "就绪");
         if (event.stopped_reason === "cancelled") {
@@ -907,6 +924,7 @@
         promptInput.focus();
         break;
       case "error":
+        streamingMessage = null;
         setRunning(false);
         setStatus("失败", "error");
         addMessage("错误", `${event.error}: ${event.message}`, "error");

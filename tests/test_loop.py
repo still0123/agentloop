@@ -113,11 +113,13 @@ def test_event_callback_reports_tool_roundtrip(workdir):
         "tool_call",
         "tool_result",
         "model_start",
+        "assistant_delta",
         "assistant_message",
         "done",
     ]
     assert events[2]["input"] == {"command": "echo hi"}
     assert "exit=0" in events[3]["content"]
+    assert events[-2]["streamed"] is True
     assert events[-1]["usage"] == result.usage
 
 

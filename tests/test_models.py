@@ -21,6 +21,29 @@ from agentloop.models import (
 )
 
 
+def _serve_sse(chunks):
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            length = int(self.headers.get("Content-Length", "0"))
+            self.server.payload = json.loads(self.rfile.read(length))
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            for chunk in chunks:
+                data = chunk if isinstance(chunk, str) else json.dumps(chunk)
+                self.wfile.write(f"data: {data}\n\n".encode())
+                self.wfile.flush()
+
+        def log_message(self, format, *args):
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, thread
+
+
 def test_detect_provider_mapping():
     expected = {
         "glm-4.6": "glm",
@@ -79,13 +102,20 @@ def test_openai_wire_messages_conversion():
 
 def test_mock_client_usage_and_exhaustion():
     client = MockClient(["a"])
+    deltas = []
 
-    response = client.complete("system", [{"role": "user", "content": "q"}], [])
+    response = client.complete(
+        "system",
+        [{"role": "user", "content": "q"}],
+        [],
+        on_text=deltas.append,
+    )
     exhausted = client.complete("system", [], [{"name": "bash"}])
 
     assert response.text == "a"
     assert response.usage == {"input_tokens": 10, "output_tokens": 5}
     assert response.blocks == [{"type": "text", "text": "a"}]
+    assert deltas == ["a"]
     assert exhausted.text == "(mock script exhausted)"
     assert client.calls[0] == {
         "system": "system",
@@ -121,6 +151,22 @@ def test_fallback_does_not_continue_after_cancellation():
     fallback = MockClient(["should not run"])
     with pytest.raises(ModelCancelled):
         FallbackClient([Cancelled(), fallback]).complete("s", [], [])
+    assert fallback.calls == []
+
+
+def test_fallback_does_not_continue_after_partial_stream():
+    class Partial:
+        model = "partial"
+
+        def complete(self, system, messages, tools, on_text=None):
+            on_text("partial")
+            raise ModelError("stream failed")
+
+    fallback = MockClient(["should not run"])
+    with pytest.raises(ModelError, match="stream failed"):
+        FallbackClient([Partial(), fallback]).complete(
+            "s", [], [], on_text=lambda delta: None
+        )
     assert fallback.calls == []
 
 
@@ -202,13 +248,167 @@ def test_openai_http_request_can_be_cancelled():
 
     try:
         with pytest.raises(ModelCancelled):
-            client.complete("system", [{"role": "user", "content": "hi"}], [])
+            client.complete(
+                "system",
+                [{"role": "user", "content": "hi"}],
+                [],
+                on_text=lambda delta: None,
+            )
         assert time.monotonic() - began < 1
     finally:
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
         cancel_thread.join(timeout=2)
+
+
+def test_openai_stream_rebuilds_text_tools_and_usage():
+    chunks = [
+        {"choices": [{"delta": {"content": "Hel"}}]},
+        {"choices": [{"delta": {"content": "lo"}}]},
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call_1",
+                                "function": {
+                                    "name": "bash",
+                                    "arguments": '{"command":',
+                                },
+                            }
+                        ]
+                    }
+                }
+            ]
+        },
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "function": {"arguments": '"echo hi"}'},
+                            }
+                        ]
+                    }
+                }
+            ]
+        },
+        {
+            "choices": [],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 2},
+        },
+        "[DONE]",
+    ]
+    server, thread = _serve_sse(chunks)
+    deltas = []
+    client = OpenAICompatClient(
+        "test", f"http://127.0.0.1:{server.server_port}", "key", retries=1
+    )
+
+    try:
+        response = client.complete("system", [], [], on_text=deltas.append)
+        assert deltas == ["Hel", "lo"]
+        assert response.text == "Hello"
+        assert response.blocks[1] == {
+            "type": "tool_use",
+            "id": "call_1",
+            "name": "bash",
+            "input": {"command": "echo hi"},
+        }
+        assert response.usage == {"input_tokens": 3, "output_tokens": 2}
+        assert server.payload["stream"] is True
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_openai_stream_error_event_fails():
+    server, thread = _serve_sse([{"error": {"message": "provider failed"}}])
+    client = OpenAICompatClient(
+        "test", f"http://127.0.0.1:{server.server_port}", "key", retries=1
+    )
+
+    try:
+        with pytest.raises(ModelError, match="provider failed"):
+            client.complete("system", [], [], on_text=lambda delta: None)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_anthropic_stream_rebuilds_text_tools_and_usage():
+    chunks = [
+        {
+            "type": "message_start",
+            "message": {"usage": {"input_tokens": 4, "output_tokens": 0}},
+        },
+        {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "text", "text": ""},
+        },
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "Hi"},
+        },
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "!"},
+        },
+        {
+            "type": "content_block_start",
+            "index": 1,
+            "content_block": {
+                "type": "tool_use",
+                "id": "tool_1",
+                "name": "read_file",
+                "input": {},
+            },
+        },
+        {
+            "type": "content_block_delta",
+            "index": 1,
+            "delta": {
+                "type": "input_json_delta",
+                "partial_json": '{"path":"README.md"}',
+            },
+        },
+        {"type": "message_delta", "usage": {"output_tokens": 5}},
+    ]
+    server, thread = _serve_sse(chunks)
+    deltas = []
+    client = AnthropicClient(
+        "test",
+        "key",
+        base_url=f"http://127.0.0.1:{server.server_port}",
+        retries=1,
+    )
+
+    try:
+        response = client.complete("system", [], [], on_text=deltas.append)
+        assert deltas == ["Hi", "!"]
+        assert response.text == "Hi!"
+        assert response.blocks[1] == {
+            "type": "tool_use",
+            "id": "tool_1",
+            "name": "read_file",
+            "input": {"path": "README.md"},
+        }
+        assert response.usage == {"input_tokens": 4, "output_tokens": 5}
+        assert server.payload["stream"] is True
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
 
 
 @pytest.mark.parametrize(

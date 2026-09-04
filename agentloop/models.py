@@ -76,23 +76,93 @@ async def _post_json_cancellable(
     if should_stop():
         raise ModelCancelled("model request cancelled")
     async with httpx.AsyncClient() as client:
-        request = asyncio.create_task(
-            client.post(url, json=payload, headers=headers, timeout=timeout)
+        return await _await_or_cancel(
+            client.post(url, json=payload, headers=headers, timeout=timeout),
+            should_stop,
         )
-        try:
-            while not request.done():
-                if should_stop():
-                    request.cancel()
-                    with suppress(asyncio.CancelledError):
-                        await request
-                    raise ModelCancelled("model request cancelled")
-                await asyncio.sleep(0.05)
-            return await request
-        finally:
-            if not request.done():
-                request.cancel()
+
+
+async def _await_or_cancel(awaitable, should_stop: Callable[[], bool]):
+    task = asyncio.ensure_future(awaitable)
+    try:
+        while not task.done():
+            if should_stop():
+                task.cancel()
                 with suppress(asyncio.CancelledError):
-                    await request
+                    await task
+                raise ModelCancelled("model request cancelled")
+            await asyncio.sleep(0.05)
+        return await task
+    finally:
+        if not task.done():
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+
+
+def _stream_sse(
+    url: str,
+    payload: dict,
+    headers: dict,
+    timeout: float,
+    should_stop: Callable[[], bool] | None,
+    on_data: Callable[[dict], None],
+) -> None:
+    asyncio.run(
+        _stream_sse_async(
+            url,
+            payload,
+            headers,
+            timeout,
+            should_stop or (lambda: False),
+            on_data,
+        )
+    )
+
+
+async def _stream_sse_async(
+    url: str,
+    payload: dict,
+    headers: dict,
+    timeout: float,
+    should_stop: Callable[[], bool],
+    on_data: Callable[[dict], None],
+) -> None:
+    import httpx
+
+    if should_stop():
+        raise ModelCancelled("model request cancelled")
+    async with httpx.AsyncClient() as client:
+        stream = client.stream(
+            "POST", url, json=payload, headers=headers, timeout=timeout
+        )
+        response = await _await_or_cancel(stream.__aenter__(), should_stop)
+        try:
+            if response.status_code in (429, 500, 502, 503, 529):
+                raise RetryableModelError(f"HTTP {response.status_code}")
+            if response.status_code >= 400:
+                body = (await response.aread()).decode(errors="replace")
+                raise ModelError(f"HTTP {response.status_code}: {body[:300]}")
+            lines = response.aiter_lines().__aiter__()
+            while True:
+                try:
+                    line = await _await_or_cancel(anext(lines), should_stop)
+                except StopAsyncIteration:
+                    break
+                if not line.startswith("data:"):
+                    continue
+                raw = line[5:].strip()
+                if not raw or raw == "[DONE]":
+                    if raw == "[DONE]":
+                        break
+                    continue
+                try:
+                    data = json.loads(raw)
+                except json.JSONDecodeError as exc:
+                    raise ModelError("invalid JSON in model stream") from exc
+                on_data(data)
+        finally:
+            await stream.__aexit__(None, None, None)
 
 
 def _sleep_or_cancel(delay: float, should_stop: Callable[[], bool] | None) -> None:
@@ -191,7 +261,13 @@ class OpenAICompatClient:
         self.retries = retries
         self.should_stop = should_stop
 
-    def complete(self, system: str, messages: list, tools: list) -> ModelResponse:
+    def complete(
+        self,
+        system: str,
+        messages: list,
+        tools: list,
+        on_text: Callable[[str], None] | None = None,
+    ) -> ModelResponse:
         import httpx  # 延迟导入：Mock 路径的测试环境无需安装
 
         payload = {
@@ -219,7 +295,17 @@ class OpenAICompatClient:
         }
         last_error = None
         for attempt in range(self.retries):
+            emitted = False
+
+            def emit_text(delta: str) -> None:
+                nonlocal emitted
+                emitted = True
+                if on_text:
+                    on_text(delta)
+
             try:
+                if on_text:
+                    return self._stream(payload, headers, emit_text)
                 resp = _post_json(
                     f"{self.base_url}/chat/completions",
                     payload,
@@ -238,9 +324,86 @@ class OpenAICompatClient:
                 httpx.TimeoutException,
                 httpx.TransportError,
             ) as exc:
+                if emitted:
+                    raise ModelError(
+                        f"{self.model}: stream interrupted: {exc}"
+                    ) from exc
                 last_error = exc
                 _sleep_or_cancel(2**attempt, self.should_stop)
         raise ModelError(f"{self.model}: {self.retries} 次重试后仍失败: {last_error}")
+
+    def _stream(
+        self,
+        payload: dict,
+        headers: dict,
+        on_text: Callable[[str], None],
+    ) -> ModelResponse:
+        text_parts: list[str] = []
+        tool_calls: dict[int, dict] = {}
+        usage: dict = {}
+
+        def on_data(data: dict) -> None:
+            nonlocal usage
+            if data.get("error"):
+                raise ModelError(f"model stream error: {data['error']}")
+            if isinstance(data.get("usage"), dict):
+                usage = data["usage"]
+            for choice in data.get("choices") or []:
+                delta = choice.get("delta") or {}
+                text = delta.get("content")
+                if isinstance(text, str) and text:
+                    text_parts.append(text)
+                    on_text(text)
+                for call in delta.get("tool_calls") or []:
+                    index = int(call.get("index", 0))
+                    target = tool_calls.setdefault(
+                        index,
+                        {"id": "", "name": "", "arguments": ""},
+                    )
+                    if call.get("id") and not target["id"]:
+                        target["id"] = call["id"]
+                    function = call.get("function") or {}
+                    if function.get("name") and not target["name"]:
+                        target["name"] = function["name"]
+                    target["arguments"] += function.get("arguments") or ""
+
+        stream_payload = dict(payload)
+        stream_payload["stream"] = True
+        _stream_sse(
+            f"{self.base_url}/chat/completions",
+            stream_payload,
+            headers,
+            self.timeout,
+            self.should_stop,
+            on_data,
+        )
+        text = "".join(text_parts)
+        if not text and not tool_calls:
+            raise ModelError("empty model stream")
+        wire_calls = [
+            {
+                "id": call["id"] or f"toolu_stream_{index}",
+                "type": "function",
+                "function": {
+                    "name": call["name"],
+                    "arguments": call["arguments"] or "{}",
+                },
+            }
+            for index, call in sorted(tool_calls.items())
+        ]
+        return self._parse(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": text or None,
+                            "tool_calls": wire_calls,
+                        }
+                    }
+                ],
+                "usage": usage,
+            }
+        )
 
     @staticmethod
     def _parse(data: dict) -> ModelResponse:
@@ -298,7 +461,13 @@ class AnthropicClient:
         self.retries = retries
         self.should_stop = should_stop
 
-    def complete(self, system: str, messages: list, tools: list) -> ModelResponse:
+    def complete(
+        self,
+        system: str,
+        messages: list,
+        tools: list,
+        on_text: Callable[[str], None] | None = None,
+    ) -> ModelResponse:
         import httpx
 
         payload = {
@@ -326,7 +495,17 @@ class AnthropicClient:
         }
         last_error = None
         for attempt in range(self.retries):
+            emitted = False
+
+            def emit_text(delta: str) -> None:
+                nonlocal emitted
+                emitted = True
+                if on_text:
+                    on_text(delta)
+
             try:
+                if on_text:
+                    return self._stream(payload, headers, emit_text)
                 resp = _post_json(
                     f"{self.base_url}/v1/messages",
                     payload,
@@ -344,9 +523,98 @@ class AnthropicClient:
                 httpx.TimeoutException,
                 httpx.TransportError,
             ) as exc:
+                if emitted:
+                    raise ModelError(
+                        f"{self.model}: stream interrupted: {exc}"
+                    ) from exc
                 last_error = exc
                 _sleep_or_cancel(2**attempt, self.should_stop)
         raise ModelError(f"{self.model}: {self.retries} 次重试后仍失败: {last_error}")
+
+    def _stream(
+        self,
+        payload: dict,
+        headers: dict,
+        on_text: Callable[[str], None],
+    ) -> ModelResponse:
+        blocks: dict[int, dict] = {}
+        tool_json: dict[int, str] = {}
+        usage = {"input_tokens": 0, "output_tokens": 0}
+
+        def on_data(data: dict) -> None:
+            event_type = data.get("type")
+            if event_type == "error":
+                raise ModelError(f"model stream error: {data.get('error')}")
+            if event_type == "message_start":
+                start_usage = (data.get("message") or {}).get("usage") or {}
+                usage["input_tokens"] = start_usage.get("input_tokens", 0)
+                usage["output_tokens"] = start_usage.get("output_tokens", 0)
+                return
+            if event_type == "message_delta":
+                delta_usage = data.get("usage") or {}
+                usage["output_tokens"] = delta_usage.get(
+                    "output_tokens", usage["output_tokens"]
+                )
+                return
+            index = int(data.get("index", 0))
+            if event_type == "content_block_start":
+                raw = data.get("content_block") or {}
+                if raw.get("type") == "text":
+                    text = raw.get("text") or ""
+                    blocks[index] = {"type": "text", "text": text}
+                    if text:
+                        on_text(text)
+                elif raw.get("type") == "tool_use":
+                    blocks[index] = {
+                        "type": "tool_use",
+                        "id": raw.get("id") or f"toolu_stream_{index}",
+                        "name": raw.get("name") or "",
+                        "input": raw.get("input") or {},
+                    }
+                    tool_json[index] = ""
+                return
+            if event_type != "content_block_delta":
+                return
+            delta = data.get("delta") or {}
+            if delta.get("type") == "text_delta":
+                text = delta.get("text") or ""
+                block = blocks.setdefault(index, {"type": "text", "text": ""})
+                block["text"] += text
+                if text:
+                    on_text(text)
+            elif delta.get("type") == "input_json_delta":
+                tool_json[index] = tool_json.get(index, "") + (
+                    delta.get("partial_json") or ""
+                )
+
+        stream_payload = dict(payload)
+        stream_payload["stream"] = True
+        stream_headers = {**headers, "accept": "text/event-stream"}
+        _stream_sse(
+            f"{self.base_url}/v1/messages",
+            stream_payload,
+            stream_headers,
+            self.timeout,
+            self.should_stop,
+            on_data,
+        )
+        for index, raw in tool_json.items():
+            if not raw:
+                continue
+            try:
+                parsed = json.loads(raw)
+                if not isinstance(parsed, dict):
+                    parsed = {"_raw": raw}
+            except json.JSONDecodeError:
+                parsed = {"_raw": raw}
+            blocks[index]["input"] = parsed
+        ordered = [block for _, block in sorted(blocks.items())]
+        if not ordered:
+            raise ModelError("empty model stream")
+        text = "".join(
+            block.get("text", "") for block in ordered if block["type"] == "text"
+        )
+        return ModelResponse(text=text, blocks=ordered, usage=usage)
 
     @staticmethod
     def _parse(data: dict) -> ModelResponse:
@@ -378,7 +646,13 @@ class MockClient:
         self.model = model
         self.calls: list[dict] = []  # 记录每次调用的入参，供测试断言
 
-    def complete(self, system: str, messages: list, tools: list) -> ModelResponse:
+    def complete(
+        self,
+        system: str,
+        messages: list,
+        tools: list,
+        on_text: Callable[[str], None] | None = None,
+    ) -> ModelResponse:
         import copy
 
         self.calls.append(
@@ -393,6 +667,8 @@ class MockClient:
             return ModelResponse(text=text, blocks=[{"type": "text", "text": text}])
         turn = self.turns.pop(0)
         if isinstance(turn, str):
+            if on_text:
+                on_text(turn)
             return ModelResponse(
                 text=turn,
                 blocks=[{"type": "text", "text": turn}],
@@ -425,17 +701,38 @@ class FallbackClient:
     def model(self) -> str:
         return self.clients[0].model
 
-    def complete(self, system: str, messages: list, tools: list) -> ModelResponse:
+    def complete(
+        self,
+        system: str,
+        messages: list,
+        tools: list,
+        on_text: Callable[[str], None] | None = None,
+    ) -> ModelResponse:
         last_error = None
+        streamed = False
+
+        def emit_text(delta: str) -> None:
+            nonlocal streamed
+            streamed = True
+            if on_text:
+                on_text(delta)
+
         for index, client in enumerate(self.clients):
             try:
-                response = client.complete(system, messages, tools)
+                if on_text:
+                    response = client.complete(
+                        system, messages, tools, on_text=emit_text
+                    )
+                else:
+                    response = client.complete(system, messages, tools)
                 if index > 0:
                     self.switched_to.append(client.model)
                 return response
             except ModelCancelled:
                 raise
             except ModelError as exc:
+                if streamed:
+                    raise
                 last_error = exc
         raise last_error
 
