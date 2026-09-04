@@ -16,6 +16,8 @@ from typing import Protocol, cast
 from .cli import _load_dotenv, build_default_agent
 from .web import SessionStore, WebState, make_server
 
+SHUTDOWN_TIMEOUT = 5
+
 
 class DesktopError(RuntimeError):
     """Raised when the native desktop shell cannot start."""
@@ -49,8 +51,11 @@ def resolve_workdir(workdir: Path | None = None) -> Path:
         os.environ.get("AGENTLOOP_ENV_FILE", "~/.agentloop/.env")
     ).expanduser()
     _load_dotenv(str(config))
-    selected = workdir or Path(os.environ.get("AGENTLOOP_WORKDIR", Path.home()))
+    configured = os.environ.get("AGENTLOOP_WORKDIR")
+    selected = workdir or Path(configured or Path.home() / ".agentloop" / "workspace")
     selected = selected.expanduser().resolve()
+    if workdir is None and not configured:
+        selected.mkdir(mode=0o700, parents=True, exist_ok=True)
     if not selected.is_dir():
         raise DesktopError(f"Workspace does not exist: {selected}")
     _load_dotenv(str(selected / ".env"))
@@ -81,13 +86,17 @@ def run_desktop(workdir: Path | None = None) -> None:
     server_thread.start()
     closing = threading.Event()
 
-    def request_shutdown(*_args: object) -> None:
+    def shutdown() -> None:
         if closing.is_set():
             return
         closing.set()
         state.stop()
+        state.wait(SHUTDOWN_TIMEOUT)
+        server.shutdown()
+
+    def request_shutdown(*_args: object) -> None:
         _mark_quit_requested()
-        threading.Thread(target=server.shutdown, daemon=True).start()
+        shutdown()
 
     try:
         window = webview.create_window(
@@ -100,8 +109,8 @@ def run_desktop(workdir: Path | None = None) -> None:
         window.events.closed += request_shutdown  # type: ignore[operator]
         webview.start()
     finally:
-        request_shutdown()
-        server_thread.join(timeout=5)
+        shutdown()
+        server_thread.join(timeout=SHUTDOWN_TIMEOUT)
         server.server_close()
 
 
@@ -132,12 +141,14 @@ def _show_startup_error(message: str) -> None:
         subprocess.run(["/usr/bin/osascript", "-e", script], check=False)
 
 
-def main() -> None:
+def main() -> int:
     try:
         run_desktop()
-    except (DesktopError, OSError, ValueError) as exc:
+    except Exception as exc:  # noqa: BLE001
         _show_startup_error(str(exc) or "AgentLoop could not start.")
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

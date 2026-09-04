@@ -289,6 +289,7 @@ class WebState:
         self._active = False
         self._cancelled = threading.Event()
         self._lock = threading.Lock()
+        self._worker: threading.Thread | None = None
         self._subscribers: set[queue.Queue] = set()
         self._permissions: dict[str, tuple[queue.Queue, dict]] = {}
 
@@ -349,7 +350,8 @@ class WebState:
                 return False
             self._cancelled.clear()
             self._active = True
-        thread = threading.Thread(target=self._run, args=(prompt,), daemon=True)
+            thread = threading.Thread(target=self._run, args=(prompt,), daemon=True)
+            self._worker = thread
         thread.start()
         return True
 
@@ -432,6 +434,16 @@ class WebState:
 
     def cancelled(self) -> bool:
         return self._cancelled.is_set()
+
+    def wait(self, timeout: float | None = None) -> bool:
+        with self._lock:
+            worker = self._worker
+        if worker is None:
+            return True
+        if worker is threading.current_thread():
+            return False
+        worker.join(timeout)
+        return not worker.is_alive()
 
     def stop(self) -> bool:
         with self._lock:

@@ -6,9 +6,7 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
   echo "This packaging script requires macOS." >&2
   exit 1
 fi
-if [[ "${SKIP_BUILD:-0}" != "1" ]]; then
-  "$repo_root/scripts/build_macos_app.sh"
-fi
+"$repo_root/scripts/build_macos_app.sh"
 
 app="$repo_root/dist/AgentLoop.app"
 [[ -d "$app" ]] || {

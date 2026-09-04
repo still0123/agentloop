@@ -119,7 +119,7 @@ make macos-package
 ls dist/installers/
 ```
 
-应用默认以用户 Home 为工作目录；建议通过 `AGENTLOOP_WORKDIR` 限定到可信项目。
+应用默认使用 `~/.agentloop/workspace`；也可以通过 `AGENTLOOP_WORKDIR` 指向可信项目。
 当前产物使用本机临时签名，适合自用；公开分发前仍需 Developer ID 签名和公证。
 
 不配置模型也能运行全部离线测试：

@@ -4,6 +4,7 @@ import threading
 import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
+from types import SimpleNamespace
 
 import pytest
 from helpers import make_agent
@@ -154,6 +155,26 @@ def test_web_stop_releases_permission_wait(workdir):
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+def test_web_state_waits_for_active_worker():
+    state = WebState()
+    started = threading.Event()
+
+    class BlockingAgent:
+        def run(self, _prompt, _messages, on_event):
+            started.set()
+            while not state.cancelled():
+                threading.Event().wait(0.01)
+            return SimpleNamespace(messages=[])
+
+    state.agent = BlockingAgent()
+
+    assert state.start("wait")
+    assert started.wait(1)
+    assert state.stop()
+    assert state.wait(1)
+    assert state.snapshot()["active"] is False
 
 
 def test_web_api_rejects_missing_token():

@@ -7,12 +7,14 @@ quit_marker="${TMPDIR:-/tmp}/agentloop-quit-$$"
 quit_timeout="${AGENTLOOP_QUIT_TIMEOUT_SECONDS:-5}"
 kill_grace="${AGENTLOOP_KILL_GRACE_SECONDS:-1}"
 child_pid=""
+terminate_requested=0
 
 cleanup() {
   rm -f "$quit_marker"
 }
 
 forward_signal() {
+  terminate_requested=1
   if [[ -n "$child_pid" ]] && kill -0 "$child_pid" 2>/dev/null; then
     kill -TERM "$child_pid" 2>/dev/null || true
   fi
@@ -27,7 +29,7 @@ child_pid=$!
 quit_started=-1
 
 while kill -0 "$child_pid" 2>/dev/null; do
-  if [[ -e "$quit_marker" ]]; then
+  if [[ -e "$quit_marker" || "$terminate_requested" -eq 1 ]]; then
     if [[ "$quit_started" -lt 0 ]]; then
       quit_started="$SECONDS"
     elif (( SECONDS - quit_started >= quit_timeout )); then
