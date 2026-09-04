@@ -93,6 +93,35 @@ Web 会话按工作区自动保存，支持创建、切换、改名和删除，�
 |---|---|
 | ![AgentLoop Web UI 展示工具调用结果和最终回答](docs/images/web-agent.png) | ![AgentLoop Web UI 请求危险命令授权](docs/images/web-permission.png) |
 
+### 4. macOS 桌面应用
+
+桌面版使用 pywebview 将同一套本地 Web UI 放入原生窗口，不引入 Electron 或
+额外服务框架。先准备桌面配置：
+
+```bash
+mkdir -p ~/.agentloop
+cp .env.example ~/.agentloop/.env
+# 编辑 ~/.agentloop/.env；可选设置 AGENTLOOP_WORKDIR=/path/to/project
+```
+
+安装构建依赖并生成应用：
+
+```bash
+python -m pip install -e ".[dev,desktop]"
+make macos-app
+open dist/AgentLoop.app
+```
+
+生成可安装的 PKG 和拖拽安装的 DMG：
+
+```bash
+make macos-package
+ls dist/installers/
+```
+
+应用默认以用户 Home 为工作目录；建议通过 `AGENTLOOP_WORKDIR` 限定到可信项目。
+当前产物使用本机临时签名，适合自用；公开分发前仍需 Developer ID 签名和公证。
+
 不配置模型也能运行全部离线测试：
 
 ```bash
@@ -155,6 +184,7 @@ sequenceDiagram
 | 模型路由 | OpenAI 兼容协议、Anthropic 原生协议、Mock、Fallback | [`models.py`](agentloop/models.py) |
 | CLI | 单次任务、保留历史的 REPL、token 统计 | [`cli.py`](agentloop/cli.py) |
 | Web UI | Token 流式、断线重放、权限审批、多会话、任务取消 | [`web.py`](agentloop/web.py) |
+| macOS 桌面壳 | 原生窗口、复用 Web UI、关闭时停止服务和任务 | [`desktop.py`](agentloop/desktop.py) |
 
 ### 内置工具
 
@@ -263,6 +293,10 @@ make test
 
 # 提交前完整检查
 make check
+
+# 构建 macOS 应用和安装包
+make macos-app
+make macos-package
 ```
 
 CI 使用 Python 3.10–3.13 矩阵执行同样的 Ruff 和 Pytest 检查。格式与静态规则
@@ -277,7 +311,6 @@ CI 使用 Python 3.10–3.13 矩阵执行同样的 Ruff 和 Pytest 检查。格�
 - 生产级 shell 沙箱；
 - Subagent、MCP、Skills、长期记忆和任务图；
 - 多用户服务端数据库和远程访问；
-- 桌面安装包；
 - 多工具并发执行。
 
 这些能力不应直接塞进核心循环。合适的扩展位置分别是工具层、Hook、上下文层或模型

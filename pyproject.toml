@@ -20,6 +20,7 @@ Issues = "https://github.com/still0123/agentloop/issues"
 
 [project.optional-dependencies]
 dev = ["build>=1.2", "pytest>=8", "ruff>=0.8"]
+desktop = ["pyinstaller>=6,<7", "pywebview>=5,<7"]
 
 [project.scripts]
 agentloop = "agentloop.cli:main"
