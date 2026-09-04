@@ -604,6 +604,11 @@
     sendButton.disabled = running;
     newSessionButton.disabled = running;
     if (running) setStatus("运行中", "busy");
+    const pendingPermission = data.permissions?.[0];
+    if (pendingPermission) {
+      setStatus("等待授权", "busy");
+      showPermission(pendingPermission);
+    }
   }
 
   async function resolvePermission(allowed) {

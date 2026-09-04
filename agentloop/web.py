@@ -105,7 +105,7 @@ class WebState:
         self._active = False
         self._lock = threading.Lock()
         self._subscribers: set[queue.Queue] = set()
-        self._permissions: dict[str, queue.Queue] = {}
+        self._permissions: dict[str, tuple[queue.Queue, dict]] = {}
 
     def subscribe(self) -> queue.Queue:
         events: queue.Queue = queue.Queue()
@@ -118,8 +118,11 @@ class WebState:
             self._subscribers.discard(events)
 
     def emit(self, event: dict) -> None:
+        self._publish(event, persist=True)
+
+    def _publish(self, event: dict, persist: bool) -> None:
         with self._lock:
-            if event.get("type") in PERSISTED_EVENT_TYPES:
+            if persist and event.get("type") in PERSISTED_EVENT_TYPES:
                 self.events.append(dict(event))
             subscribers = tuple(self._subscribers)
         for events in subscribers:
@@ -138,25 +141,37 @@ class WebState:
         return True
 
     def _run(self, prompt: str) -> None:
+        terminal_event = None
+
+        def emit(event: dict) -> None:
+            nonlocal terminal_event
+            if event.get("type") in {"done", "error"}:
+                terminal_event = dict(event)
+                return
+            self.emit(event)
+
         try:
             if self.agent is None:
-                self.emit(
-                    {
-                        "type": "error",
-                        "error": "RuntimeError",
-                        "message": "web agent is not configured",
-                    }
-                )
+                terminal_event = {
+                    "type": "error",
+                    "error": "RuntimeError",
+                    "message": "web agent is not configured",
+                }
                 return
-            result = self.agent.run(prompt, self.messages, on_event=self.emit)
+            result = self.agent.run(prompt, self.messages, on_event=emit)
             with self._lock:
                 self.messages = result.messages
         except Exception:
             pass  # Agent.run emits the error event before re-raising.
         finally:
+            with self._lock:
+                if terminal_event:
+                    self.events.append(terminal_event)
+                messages = list(self.messages)
+                events = list(self.events)
             if self.store:
                 try:
-                    self.store.save(self.messages, self.events)
+                    self.store.save(messages, events)
                 except Exception as exc:  # noqa: BLE001
                     self.emit(
                         {
@@ -166,10 +181,16 @@ class WebState:
                     )
             with self._lock:
                 self._active = False
+            if terminal_event:
+                self._publish(terminal_event, persist=False)
 
     def snapshot(self) -> dict:
         with self._lock:
-            return {"events": list(self.events), "active": self._active}
+            return {
+                "events": list(self.events),
+                "active": self._active,
+                "permissions": [dict(event) for _, event in self._permissions.values()],
+            }
 
     def reset(self) -> bool:
         with self._lock:
@@ -185,17 +206,16 @@ class WebState:
     def ask_user(self, tool_name: str, args: dict, reason: str) -> bool:
         request_id = secrets.token_urlsafe(12)
         answer: queue.Queue = queue.Queue(maxsize=1)
+        event = {
+            "type": "permission_request",
+            "id": request_id,
+            "tool": tool_name,
+            "input": args,
+            "reason": reason,
+        }
         with self._lock:
-            self._permissions[request_id] = answer
-        self.emit(
-            {
-                "type": "permission_request",
-                "id": request_id,
-                "tool": tool_name,
-                "input": args,
-                "reason": reason,
-            }
-        )
+            self._permissions[request_id] = (answer, event)
+        self.emit(event)
         timed_out = False
         try:
             allowed = bool(answer.get(timeout=self.permission_timeout))
@@ -217,9 +237,10 @@ class WebState:
 
     def resolve_permission(self, request_id: str, allowed: bool) -> bool:
         with self._lock:
-            answer = self._permissions.get(request_id)
-        if answer is None:
+            pending = self._permissions.get(request_id)
+        if pending is None:
             return False
+        answer, _ = pending
         try:
             answer.put_nowait(allowed)
         except queue.Full:
@@ -229,6 +250,11 @@ class WebState:
 
 class LocalHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
+
+    def handle_error(self, request, client_address) -> None:
+        if isinstance(sys.exc_info()[1], (BrokenPipeError, ConnectionResetError)):
+            return
+        super().handle_error(request, client_address)
 
 
 def make_handler(state: WebState, token: str):

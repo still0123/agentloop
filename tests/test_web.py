@@ -1,8 +1,8 @@
 import json
 import threading
-import time
 import urllib.error
 import urllib.request
+from http.server import ThreadingHTTPServer
 
 import pytest
 from helpers import make_agent
@@ -65,6 +65,8 @@ def test_web_permission_approval_resumes_agent(workdir):
         request = _next(events, "permission_request")
         assert request["input"] == {"command": "rm notes.txt"}
         assert target.exists()
+        _, snapshot = _get(base_url, token, "/api/session")
+        assert snapshot["permissions"] == [request]
 
         status, body = _post(
             base_url,
@@ -76,6 +78,8 @@ def test_web_permission_approval_resumes_agent(workdir):
         assert body == {"ok": True}
         assert _next(events, "done")["text"] == "done"
         assert not target.exists()
+        _, snapshot = _get(base_url, token, "/api/session")
+        assert snapshot["permissions"] == []
     finally:
         state.unsubscribe(events)
         server.shutdown()
@@ -104,6 +108,30 @@ def test_web_api_rejects_missing_token():
         thread.join(timeout=2)
 
 
+def test_server_suppresses_expected_disconnect_errors(monkeypatch):
+    server = make_server(WebState(), "secret")
+    unexpected = []
+    monkeypatch.setattr(
+        ThreadingHTTPServer,
+        "handle_error",
+        lambda *args: unexpected.append(True),
+    )
+    try:
+        try:
+            raise ConnectionResetError
+        except ConnectionResetError:
+            server.handle_error(None, None)
+        assert unexpected == []
+
+        try:
+            raise RuntimeError
+        except RuntimeError:
+            server.handle_error(None, None)
+        assert unexpected == [True]
+    finally:
+        server.server_close()
+
+
 def test_web_permission_timeout_denies_by_default():
     state = WebState(permission_timeout=0.01)
     assert state.ask_user("bash", {"command": "rm file"}, "risky") is False
@@ -130,8 +158,8 @@ def test_web_state_restores_completed_session(workdir):
 
     assert state.start("remember this")
     assert _next(events, "done")["text"] == "persisted answer"
-    while state.snapshot()["active"]:
-        time.sleep(0.01)
+    assert state.snapshot()["active"] is False
+    assert store.path.is_file()
 
     restored = WebState(store=store)
     assert restored.messages == state.messages
