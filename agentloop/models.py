@@ -18,8 +18,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
+from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass, field
 
 
@@ -39,6 +42,71 @@ class ModelError(RuntimeError):
 
 class RetryableModelError(ModelError):
     pass
+
+
+class ModelCancelled(ModelError):
+    pass
+
+
+def _post_json(
+    url: str,
+    payload: dict,
+    headers: dict,
+    timeout: float,
+    should_stop: Callable[[], bool] | None,
+):
+    import httpx
+
+    if should_stop is None:
+        return httpx.post(url, json=payload, headers=headers, timeout=timeout)
+    return asyncio.run(
+        _post_json_cancellable(url, payload, headers, timeout, should_stop)
+    )
+
+
+async def _post_json_cancellable(
+    url: str,
+    payload: dict,
+    headers: dict,
+    timeout: float,
+    should_stop: Callable[[], bool],
+):
+    import httpx
+
+    if should_stop():
+        raise ModelCancelled("model request cancelled")
+    async with httpx.AsyncClient() as client:
+        request = asyncio.create_task(
+            client.post(url, json=payload, headers=headers, timeout=timeout)
+        )
+        try:
+            while not request.done():
+                if should_stop():
+                    request.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await request
+                    raise ModelCancelled("model request cancelled")
+                await asyncio.sleep(0.05)
+            return await request
+        finally:
+            if not request.done():
+                request.cancel()
+                with suppress(asyncio.CancelledError):
+                    await request
+
+
+def _sleep_or_cancel(delay: float, should_stop: Callable[[], bool] | None) -> None:
+    if should_stop is None:
+        time.sleep(delay)
+        return
+    deadline = time.monotonic() + delay
+    while True:
+        if should_stop():
+            raise ModelCancelled("model request cancelled")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(0.05, remaining))
 
 
 # ---------------------------------------------------------------------------
@@ -113,6 +181,7 @@ class OpenAICompatClient:
         max_tokens: int = 8000,
         timeout: float = 120.0,
         retries: int = 3,
+        should_stop: Callable[[], bool] | None = None,
     ) -> None:
         self.model = model
         self.base_url = base_url.rstrip("/")
@@ -120,6 +189,7 @@ class OpenAICompatClient:
         self.max_tokens = max_tokens
         self.timeout = timeout
         self.retries = retries
+        self.should_stop = should_stop
 
     def complete(self, system: str, messages: list, tools: list) -> ModelResponse:
         import httpx  # 延迟导入：Mock 路径的测试环境无需安装
@@ -150,11 +220,12 @@ class OpenAICompatClient:
         last_error = None
         for attempt in range(self.retries):
             try:
-                resp = httpx.post(
+                resp = _post_json(
                     f"{self.base_url}/chat/completions",
-                    json=payload,
-                    headers=headers,
-                    timeout=self.timeout,
+                    payload,
+                    headers,
+                    self.timeout,
+                    self.should_stop,
                 )
                 if resp.status_code in (429, 500, 502, 503, 529):
                     raise RetryableModelError(f"HTTP {resp.status_code}")
@@ -168,7 +239,7 @@ class OpenAICompatClient:
                 httpx.TransportError,
             ) as exc:
                 last_error = exc
-                time.sleep(2**attempt)
+                _sleep_or_cancel(2**attempt, self.should_stop)
         raise ModelError(f"{self.model}: {self.retries} 次重试后仍失败: {last_error}")
 
     @staticmethod
@@ -217,6 +288,7 @@ class AnthropicClient:
         max_tokens: int = 8000,
         timeout: float = 120.0,
         retries: int = 3,
+        should_stop: Callable[[], bool] | None = None,
     ) -> None:
         self.model = model
         self.api_key = api_key
@@ -224,6 +296,7 @@ class AnthropicClient:
         self.max_tokens = max_tokens
         self.timeout = timeout
         self.retries = retries
+        self.should_stop = should_stop
 
     def complete(self, system: str, messages: list, tools: list) -> ModelResponse:
         import httpx
@@ -254,11 +327,12 @@ class AnthropicClient:
         last_error = None
         for attempt in range(self.retries):
             try:
-                resp = httpx.post(
+                resp = _post_json(
                     f"{self.base_url}/v1/messages",
-                    json=payload,
-                    headers=headers,
-                    timeout=self.timeout,
+                    payload,
+                    headers,
+                    self.timeout,
+                    self.should_stop,
                 )
                 if resp.status_code in (429, 500, 502, 503, 529):
                     raise RetryableModelError(f"HTTP {resp.status_code}")
@@ -271,7 +345,7 @@ class AnthropicClient:
                 httpx.TransportError,
             ) as exc:
                 last_error = exc
-                time.sleep(2**attempt)
+                _sleep_or_cancel(2**attempt, self.should_stop)
         raise ModelError(f"{self.model}: {self.retries} 次重试后仍失败: {last_error}")
 
     @staticmethod
@@ -359,6 +433,8 @@ class FallbackClient:
                 if index > 0:
                     self.switched_to.append(client.model)
                 return response
+            except ModelCancelled:
+                raise
             except ModelError as exc:
                 last_error = exc
         raise last_error
@@ -437,7 +513,11 @@ def _first_env(envs: tuple, get) -> str | None:
     return None
 
 
-def build_client(model: str | None = None, env: dict | None = None):
+def build_client(
+    model: str | None = None,
+    env: dict | None = None,
+    should_stop: Callable[[], bool] | None = None,
+):
     """根据环境变量组装模型客户端。优先级：
     显式 BASE_URL+API_KEY > AGENTLOOP_PROVIDER > 模型名前缀检测 > openai。
     """
@@ -478,11 +558,16 @@ def build_client(model: str | None = None, env: dict | None = None):
             key,
             base_url=base_url or PROFILES["anthropic"].base_url,
             max_tokens=max_tokens,
+            should_stop=should_stop,
         )
 
     if base_url:  # 自定义 OpenAI 兼容端点（Ollama 等本地服务常无鉴权）
         return OpenAICompatClient(
-            model, base_url, api_key or "EMPTY", max_tokens=max_tokens
+            model,
+            base_url,
+            api_key or "EMPTY",
+            max_tokens=max_tokens,
+            should_stop=should_stop,
         )
 
     profile = PROFILES[provider or detect_provider(model) or "openai"]
@@ -494,6 +579,16 @@ def build_client(model: str | None = None, env: dict | None = None):
     # 前缀检测也必须尊重适配器类型，否则 claude-* 会误走 OpenAI 线协议。
     if profile.adapter == "anthropic":
         return AnthropicClient(
-            model, key, base_url=profile.base_url, max_tokens=max_tokens
+            model,
+            key,
+            base_url=profile.base_url,
+            max_tokens=max_tokens,
+            should_stop=should_stop,
         )
-    return OpenAICompatClient(model, profile.base_url, key, max_tokens=max_tokens)
+    return OpenAICompatClient(
+        model,
+        profile.base_url,
+        key,
+        max_tokens=max_tokens,
+        should_stop=should_stop,
+    )

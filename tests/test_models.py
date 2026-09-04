@@ -1,6 +1,9 @@
 """模型路由与内部消息适配测试，全程不访问网络。"""
 
 import json
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
@@ -9,6 +12,7 @@ from agentloop.models import (
     AnthropicClient,
     FallbackClient,
     MockClient,
+    ModelCancelled,
     ModelError,
     OpenAICompatClient,
     _openai_wire_messages,
@@ -107,14 +111,34 @@ def test_fallback_client_switches():
         FallbackClient([Boom(), Boom()]).complete("s", [], [])
 
 
+def test_fallback_does_not_continue_after_cancellation():
+    class Cancelled:
+        model = "cancelled"
+
+        def complete(self, system, messages, tools):
+            raise ModelCancelled("cancelled")
+
+    fallback = MockClient(["should not run"])
+    with pytest.raises(ModelCancelled):
+        FallbackClient([Cancelled(), fallback]).complete("s", [], [])
+    assert fallback.calls == []
+
+
 def test_build_client_env_injection():
-    glm = build_client("glm-4.6", env={"GLM_API_KEY": "k"})
+    def should_stop():
+        return False
+
+    glm = build_client("glm-4.6", env={"GLM_API_KEY": "k"}, should_stop=should_stop)
     assert isinstance(glm, OpenAICompatClient)
     assert "open.bigmodel.cn" in glm.base_url
     assert glm.api_key == "k"
+    assert glm.should_stop is should_stop
 
-    anthropic = build_client("claude-x", env={"ANTHROPIC_API_KEY": "k"})
+    anthropic = build_client(
+        "claude-x", env={"ANTHROPIC_API_KEY": "k"}, should_stop=should_stop
+    )
     assert isinstance(anthropic, AnthropicClient)
+    assert anthropic.should_stop is should_stop
 
     local = build_client(
         "llama3", env={"AGENTLOOP_BASE_URL": "http://localhost:11434/v1"}
@@ -133,6 +157,58 @@ def test_build_client_env_injection():
         env={"AGENTLOOP_PROVIDER": "anthropic", "ANTHROPIC_API_KEY": "k"},
     )
     assert isinstance(explicit, AnthropicClient)
+
+
+def test_openai_http_request_can_be_cancelled():
+    started = threading.Event()
+    cancelled = threading.Event()
+
+    class SlowHandler(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            started.set()
+            time.sleep(2)
+            try:
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"{}")
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+        def log_message(self, format, *args):
+            return
+
+    class Server(ThreadingHTTPServer):
+        daemon_threads = True
+
+        def handle_error(self, request, client_address):
+            return
+
+    server = Server(("127.0.0.1", 0), SlowHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    cancel_thread = threading.Thread(
+        target=lambda: started.wait(1) and cancelled.set(), daemon=True
+    )
+    cancel_thread.start()
+    client = OpenAICompatClient(
+        "test",
+        f"http://127.0.0.1:{server.server_port}",
+        "key",
+        timeout=10,
+        retries=1,
+        should_stop=cancelled.is_set,
+    )
+    began = time.monotonic()
+
+    try:
+        with pytest.raises(ModelCancelled):
+            client.complete("system", [{"role": "user", "content": "hi"}], [])
+        assert time.monotonic() - began < 1
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+        cancel_thread.join(timeout=2)
 
 
 @pytest.mark.parametrize(

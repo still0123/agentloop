@@ -104,6 +104,8 @@ class Agent:
                     self.system_prompt, messages, self.toolbox.defs
                 )
             except Exception as exc:  # 估算失误导致超限 → 补救一次
+                if self.should_stop():
+                    return _cancelled_result(messages, turns, usage, emit)
                 if reactive_retries < self.reactive_retries and _is_prompt_too_long(
                     exc
                 ):

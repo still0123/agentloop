@@ -50,7 +50,7 @@ def build_default_agent(
     ask_user: AskUser | None = None,
     should_stop: Callable[[], bool] | None = None,
 ) -> Agent:
-    client = build_client()
+    client = build_client(should_stop=should_stop)
 
     # 备用模型：AGENTLOOP_FALLBACK_MODELS="a,b"（可跨提供商）
     fallbacks = [
@@ -59,7 +59,9 @@ def build_default_agent(
         if m.strip()
     ]
     if fallbacks:
-        client = FallbackClient([client, *(_build_named(m) for m in fallbacks)])
+        client = FallbackClient(
+            [client, *(_build_named(m, should_stop) for m in fallbacks)]
+        )
 
     toolbox, _todo = build_toolbox(workdir, should_stop=should_stop)
     hooks = HookRegistry()
@@ -98,12 +100,12 @@ def build_default_agent(
     )
 
 
-def _build_named(model: str):
+def _build_named(model: str, should_stop: Callable[[], bool] | None = None):
     """为备用模型临时切换 AGENTLOOP_MODEL 再构建。"""
     old = os.environ.get("AGENTLOOP_MODEL")
     os.environ["AGENTLOOP_MODEL"] = model
     try:
-        return build_client(model)
+        return build_client(model, should_stop=should_stop)
     finally:
         if old is None:
             os.environ.pop("AGENTLOOP_MODEL", None)

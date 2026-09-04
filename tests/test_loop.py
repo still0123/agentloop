@@ -1,6 +1,8 @@
 import pytest
 from helpers import make_agent, tool_results
 
+from agentloop.models import ModelCancelled
+
 
 def test_final_text_without_tools(workdir):
     agent, mock = make_agent(["hello"], workdir)
@@ -167,3 +169,23 @@ def test_cancel_between_tools_skips_remaining_calls(workdir):
     assert not (workdir / "b.txt").exists()
     assert any("cancelled by user" in item for item in tool_results(result.messages))
     assert len(mock.calls) == 1
+
+
+def test_model_cancellation_becomes_cancelled_result(workdir):
+    state = {"cancelled": False}
+    events = []
+    agent, mock = make_agent(
+        ["unused"],
+        workdir,
+        should_stop=lambda: state["cancelled"],
+    )
+
+    def cancel(*args):
+        state["cancelled"] = True
+        raise ModelCancelled("model request cancelled")
+
+    mock.complete = cancel
+    result = agent.run("stop model", on_event=events.append)
+
+    assert result.stopped_reason == "cancelled"
+    assert events[-1]["type"] == "done"
