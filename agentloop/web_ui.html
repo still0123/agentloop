@@ -781,11 +781,6 @@
       stopButton.textContent = "停止中";
       setStatus("停止中", "busy");
     }
-    const pendingPermission = data.permissions?.[0];
-    if (pendingPermission) {
-      setStatus("等待授权", "busy");
-      showPermission(pendingPermission);
-    }
   }
 
   async function changeSession(path, body) {
@@ -807,7 +802,7 @@
     );
     allowButton.disabled = false;
     denyButton.disabled = false;
-    dialog.showModal();
+    if (!dialog.open) dialog.showModal();
     denyButton.focus();
   }
 
@@ -832,6 +827,15 @@
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
     applySnapshot(data);
+    for (const event of data.live_events || []) {
+      handleEvent(event);
+    }
+    const pendingPermission = data.permissions?.[0];
+    if (pendingPermission) {
+      setStatus("等待授权", "busy");
+      showPermission(pendingPermission);
+    }
+    if (!stream) connectEvents(data.last_event_id || 0);
   }
 
   async function resolvePermission(allowed) {
@@ -847,20 +851,9 @@
     }
   }
 
-  const stream = new EventSource(
-    `/api/events?token=${encodeURIComponent(TOKEN)}`,
-  );
+  let stream = null;
 
-  stream.onopen = () => {
-    if (!running) setStatus("就绪");
-  };
-
-  stream.onerror = () => {
-    if (!running) setStatus("连接中", "busy");
-  };
-
-  stream.onmessage = ({ data }) => {
-    const event = JSON.parse(data);
+  function handleEvent(event) {
     switch (event.type) {
       case "run_start":
         setRunning(true);
@@ -947,8 +940,29 @@
         stopPermissionButton.disabled = true;
         setStatus("停止中", "busy");
         break;
+      case "replay_reset":
+        stream?.close();
+        stream = null;
+        loadSession().catch((error) => {
+          addMessage("错误", error.message, "error");
+        });
+        break;
     }
-  };
+  }
+
+  function connectEvents(lastEventId) {
+    const query =
+      `/api/events?token=${encodeURIComponent(TOKEN)}` +
+      `&since=${encodeURIComponent(lastEventId)}`;
+    stream = new EventSource(query);
+    stream.onopen = () => {
+      if (!running) setStatus("就绪");
+    };
+    stream.onerror = () => {
+      if (!running) setStatus("连接中", "busy");
+    };
+    stream.onmessage = ({ data }) => handleEvent(JSON.parse(data));
+  }
 
   composer.addEventListener("submit", async (event) => {
     event.preventDefault();

@@ -9,6 +9,7 @@ import pytest
 from helpers import make_agent
 
 from agentloop import cli
+from agentloop import web as web_module
 from agentloop.web import (
     MAX_EVENT_TEXT,
     MAX_SESSION_EVENTS,
@@ -74,7 +75,7 @@ def test_web_permission_approval_resumes_agent(workdir):
         assert request["input"] == {"command": "rm notes.txt"}
         assert target.exists()
         _, snapshot = _get(base_url, token, "/api/session")
-        assert snapshot["permissions"] == [request]
+        assert snapshot["permissions"][0]["id"] == request["id"]
 
         status, body = _post(
             base_url,
@@ -327,13 +328,75 @@ def test_session_api_reads_and_clears_history(workdir):
     try:
         status, body = _get(base_url, token, "/api/session")
         assert status == 200
-        assert body["events"] == [{"type": "run_start", "prompt": "old prompt"}]
+        assert body["events"][0]["type"] == "run_start"
+        assert body["events"][0]["prompt"] == "old prompt"
+        assert isinstance(body["events"][0]["event_id"], int)
 
         status, body = _post(base_url, token, "/api/session/reset", {})
         assert status == 200
         assert body == {"ok": True}
         assert state.snapshot()["events"] == []
         assert store.path.exists()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_event_subscriber_replays_after_last_event_id():
+    state = WebState()
+    first = state.emit({"type": "first"})
+    second = state.emit({"type": "second"})
+
+    replay = state.subscribe(first["event_id"])
+
+    assert replay.get_nowait() == second
+    assert replay.empty()
+
+
+def test_session_snapshot_includes_transient_gap_events():
+    state = WebState()
+    persisted = state.emit({"type": "run_start", "prompt": "hello"})
+    model_start = state.emit({"type": "model_start", "turn": 1})
+    delta = state.emit({"type": "assistant_delta", "text": "Hi", "turn": 1})
+
+    snapshot = state.snapshot()
+
+    assert snapshot["events"] == [persisted]
+    assert snapshot["live_events"] == [model_start, delta]
+    assert snapshot["last_event_id"] == delta["event_id"]
+
+
+def test_replay_buffer_overflow_requests_snapshot(monkeypatch):
+    monkeypatch.setattr(web_module, "MAX_REPLAY_EVENTS", 2)
+    state = WebState()
+    first = state.emit({"type": "first"})
+    state.emit({"type": "second"})
+    state.emit({"type": "third"})
+
+    replay = state.subscribe(first["event_id"])
+
+    assert replay.get_nowait()["type"] == "replay_reset"
+    assert replay.empty()
+
+
+def test_sse_honors_last_event_id_header():
+    state = WebState()
+    first = state.emit({"type": "first"})
+    second = state.emit({"type": "second"})
+    server = make_server(state, "test-token")
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{server.server_port}/api/events?token=test-token",
+        headers={"Last-Event-ID": str(first["event_id"])},
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=2) as response:
+            assert response.readline().decode().strip() == (f"id: {second['event_id']}")
+            data = response.readline().decode().removeprefix("data: ").strip()
+            assert json.loads(data)["type"] == "second"
     finally:
         server.shutdown()
         server.server_close()

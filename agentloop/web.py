@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 import webbrowser
+from collections import deque
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -25,6 +26,8 @@ SESSION_VERSION = 2
 MAX_SESSIONS = 20
 MAX_SESSION_EVENTS = 500
 MAX_EVENT_TEXT = 20_000
+MAX_REPLAY_EVENTS = 5_000
+TRANSIENT_SNAPSHOT_TYPES = {"model_start", "assistant_delta", "cancel_requested"}
 PERSISTED_EVENT_TYPES = {
     "run_start",
     "assistant_message",
@@ -279,15 +282,30 @@ class WebState:
         self.permission_timeout = permission_timeout
         self.store = store
         self.messages, self.events = store.load() if store else ([], [])
+        self._next_event_id = max(time.time_ns() // 1_000, 1)
+        self._normalize_event_ids()
+        self._replay: deque[dict] = deque()
+        self._replay_floor = 0
         self._active = False
         self._cancelled = threading.Event()
         self._lock = threading.Lock()
         self._subscribers: set[queue.Queue] = set()
         self._permissions: dict[str, tuple[queue.Queue, dict]] = {}
 
-    def subscribe(self) -> queue.Queue:
+    def subscribe(self, last_event_id: int = 0) -> queue.Queue:
         events: queue.Queue = queue.Queue()
         with self._lock:
+            if self._replay_floor and last_event_id <= self._replay_floor:
+                events.put(
+                    {
+                        "type": "replay_reset",
+                        "event_id": self._next_event_id - 1,
+                    }
+                )
+            else:
+                for event in self._replay:
+                    if event["event_id"] > last_event_id:
+                        events.put(event)
             self._subscribers.add(events)
         return events
 
@@ -295,14 +313,29 @@ class WebState:
         with self._lock:
             self._subscribers.discard(events)
 
-    def emit(self, event: dict) -> None:
-        self._publish(event, persist=True)
+    def emit(self, event: dict) -> dict:
+        return self._publish(event, persist=True)
 
-    def _publish(self, event: dict, persist: bool) -> None:
+    def _publish(self, event: dict, persist: bool, broadcast: bool = True) -> dict:
         with self._lock:
-            if persist and event.get("type") in PERSISTED_EVENT_TYPES:
-                self.events.append(dict(event))
+            record = dict(event)
+            record["event_id"] = self._next_event_id
+            record["session_id"] = self.store.active_id if self.store else "memory"
+            self._next_event_id += 1
+            if persist and record.get("type") in PERSISTED_EVENT_TYPES:
+                self.events.append(record)
                 del self.events[:-MAX_SESSION_EVENTS]
+            if len(self._replay) >= MAX_REPLAY_EVENTS:
+                removed = self._replay.popleft()
+                self._replay_floor = removed["event_id"]
+            self._replay.append(record)
+            subscribers = tuple(self._subscribers) if broadcast else ()
+        for events in subscribers:
+            events.put(record)
+        return record
+
+    def _broadcast(self, event: dict) -> None:
+        with self._lock:
             subscribers = tuple(self._subscribers)
         for events in subscribers:
             events.put(event)
@@ -344,10 +377,12 @@ class WebState:
         except Exception:
             pass  # Agent.run emits the error event before re-raising.
         finally:
+            terminal_record = None
+            if terminal_event:
+                terminal_record = self._publish(
+                    terminal_event, persist=True, broadcast=False
+                )
             with self._lock:
-                if terminal_event:
-                    self.events.append(terminal_event)
-                    del self.events[:-MAX_SESSION_EVENTS]
                 messages = list(self.messages)
                 events = list(self.events)
             if self.store:
@@ -362,13 +397,30 @@ class WebState:
                     )
             with self._lock:
                 self._active = False
-            if terminal_event:
-                self._publish(terminal_event, persist=False)
+            if terminal_record:
+                self._broadcast(terminal_record)
 
     def snapshot(self) -> dict:
         with self._lock:
+            persisted_event_id = max(
+                (
+                    event.get("event_id", 0)
+                    for event in self.events
+                    if isinstance(event.get("event_id"), int)
+                ),
+                default=0,
+            )
+            active_id = self.store.active_id if self.store else "memory"
             snapshot = {
                 "events": list(self.events),
+                "live_events": [
+                    dict(event)
+                    for event in self._replay
+                    if event["event_id"] > persisted_event_id
+                    and event.get("session_id") == active_id
+                    and event.get("type") in TRANSIENT_SNAPSHOT_TYPES
+                ],
+                "last_event_id": self._next_event_id - 1,
                 "active": self._active,
                 "cancelling": self._active and self._cancelled.is_set(),
                 "permissions": [dict(event) for _, event in self._permissions.values()],
@@ -413,6 +465,7 @@ class WebState:
                 raise RuntimeError("session persistence is disabled")
             self.store.create(title)
             self.messages, self.events = self.store.load()
+            self._normalize_event_ids()
         self.emit({"type": "session_changed"})
         return self.snapshot()
 
@@ -423,6 +476,7 @@ class WebState:
                 raise RuntimeError("session persistence is disabled")
             self.store.activate(session_id)
             self.messages, self.events = self.store.load()
+            self._normalize_event_ids()
         self.emit({"type": "session_changed"})
         return self.snapshot()
 
@@ -444,12 +498,22 @@ class WebState:
             self.store.delete(session_id)
             if was_active:
                 self.messages, self.events = self.store.load()
+                self._normalize_event_ids()
         self.emit({"type": "session_changed" if was_active else "session_list_changed"})
         return self.snapshot()
 
     def _require_idle(self) -> None:
         if self._active:
             raise RuntimeError("an agent run is active")
+
+    def _normalize_event_ids(self) -> None:
+        for event in self.events:
+            event_id = event.get("event_id")
+            if not isinstance(event_id, int):
+                event["event_id"] = self._next_event_id
+                self._next_event_id += 1
+            else:
+                self._next_event_id = max(self._next_event_id, event_id + 1)
 
     def ask_user(self, tool_name: str, args: dict, reason: str) -> bool:
         request_id = secrets.token_urlsafe(12)
@@ -529,7 +593,16 @@ def make_handler(state: WebState, token: str):
                 if not secrets.compare_digest(supplied, token):
                     self._json(HTTPStatus.FORBIDDEN, {"error": "invalid token"})
                     return
-                self._events()
+                raw_event_id = (
+                    self.headers.get("Last-Event-ID")
+                    or parse_qs(target.query).get("since", ["0"])[0]
+                )
+                try:
+                    last_event_id = max(0, int(raw_event_id))
+                except ValueError:
+                    self._json(HTTPStatus.BAD_REQUEST, {"error": "invalid event id"})
+                    return
+                self._events(last_event_id)
                 return
             if target.path == "/api/session":
                 if not self._authorized():
@@ -638,8 +711,8 @@ def make_handler(state: WebState, token: str):
 
             self._json(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
-        def _events(self) -> None:
-            events = state.subscribe()
+        def _events(self, last_event_id: int) -> None:
+            events = state.subscribe(last_event_id)
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
             self.send_header("Cache-Control", "no-cache")
@@ -650,7 +723,7 @@ def make_handler(state: WebState, token: str):
                     try:
                         event = events.get(timeout=15)
                         data = json.dumps(event, ensure_ascii=False, default=str)
-                        chunk = f"data: {data}\n\n".encode()
+                        chunk = (f"id: {event['event_id']}\ndata: {data}\n\n").encode()
                     except queue.Empty:
                         chunk = b": keepalive\n\n"
                     self.wfile.write(chunk)
