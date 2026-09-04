@@ -1,3 +1,4 @@
+import hashlib
 import json
 import threading
 import urllib.error
@@ -8,7 +9,14 @@ import pytest
 from helpers import make_agent
 
 from agentloop import cli
-from agentloop.web import SessionStore, WebState, make_server
+from agentloop.web import (
+    MAX_EVENT_TEXT,
+    MAX_SESSION_EVENTS,
+    MAX_SESSIONS,
+    SessionStore,
+    WebState,
+    make_server,
+)
 
 
 def _post(base_url, token, path, payload):
@@ -104,6 +112,9 @@ def test_web_stop_cancels_running_bash(workdir):
     try:
         assert _post(base_url, token, "/api/run", {"prompt": "wait"})[0] == 202
         assert _next(events, "tool_call")["name"] == "bash"
+        with pytest.raises(urllib.error.HTTPError) as caught:
+            _post(base_url, token, "/api/session/create", {})
+        assert caught.value.code == 409
         assert _post(base_url, token, "/api/stop", {}) == (202, {"ok": True})
         assert _next(events, "tool_result")["cancelled"] is True
         done = _next(events, "done")
@@ -205,6 +216,79 @@ def test_session_store_roundtrip_and_clear(workdir):
     assert store.path.stat().st_mode & 0o777 == 0o600
     store.clear()
     assert store.load() == ([], [])
+    assert store.path.is_file()
+
+
+def test_session_store_create_switch_rename_delete(workdir):
+    store = SessionStore(workdir, root=workdir / "state")
+    first = store.active_id
+    store.save(
+        [{"role": "user", "content": "first"}],
+        [{"type": "run_start", "prompt": "first"}],
+    )
+
+    second = store.create("second")
+    assert second != first
+    assert store.load() == ([], [])
+    store.save(
+        [{"role": "user", "content": "second"}],
+        [{"type": "run_start", "prompt": "second"}],
+    )
+    store.rename(second, "renamed")
+    assert store.list_sessions()[0]["title"] == "renamed"
+
+    store.activate(first)
+    assert store.load()[0][0]["content"] == "first"
+    assert store.delete(first) == second
+    assert store.active_id == second
+    assert store.load()[0][0]["content"] == "second"
+
+
+def test_session_store_migrates_v1_catalog(workdir):
+    root = workdir / "state"
+    digest = hashlib.sha256(str(workdir.resolve()).encode()).hexdigest()[:20]
+    path = root / "sessions" / f"{digest}.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "workspace": str(workdir.resolve()),
+                "messages": [{"role": "user", "content": "legacy"}],
+                "events": [{"type": "run_start", "prompt": "legacy task"}],
+            }
+        )
+    )
+
+    store = SessionStore(workdir, root=root)
+
+    assert store.load()[0][0]["content"] == "legacy"
+    assert store.list_sessions()[0]["title"] == "legacy task"
+    store.save(*store.load())
+    assert json.loads(path.read_text())["version"] == 2
+
+
+def test_session_store_bounds_persisted_events(workdir):
+    store = SessionStore(workdir, root=workdir / "state")
+    events = [
+        {"type": "tool_result", "content": "x" * (MAX_EVENT_TEXT + 10)}
+        for _ in range(MAX_SESSION_EVENTS + 10)
+    ]
+
+    store.save([], events)
+    _, restored = SessionStore(workdir, root=workdir / "state").load()
+
+    assert len(restored) == MAX_SESSION_EVENTS
+    assert "truncated" in restored[0]["content"]
+
+
+def test_session_store_enforces_session_limit(workdir):
+    store = SessionStore(workdir, root=workdir / "state")
+    for index in range(MAX_SESSIONS - 1):
+        store.create(f"session {index}")
+
+    with pytest.raises(ValueError, match="session limit"):
+        store.create("one too many")
 
 
 def test_web_state_restores_completed_session(workdir):
@@ -249,7 +333,43 @@ def test_session_api_reads_and_clears_history(workdir):
         assert status == 200
         assert body == {"ok": True}
         assert state.snapshot()["events"] == []
-        assert not store.path.exists()
+        assert store.path.exists()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_session_api_manages_multiple_sessions(workdir):
+    store = SessionStore(workdir, root=workdir / "state")
+    first = store.active_id
+    state = WebState(store=store)
+    token = "test-token"
+    server = make_server(state, token)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_port}"
+
+    try:
+        _, created = _post(base_url, token, "/api/session/create", {})
+        second = created["active_id"]
+        assert second != first
+        assert len(created["sessions"]) == 2
+
+        _, renamed = _post(
+            base_url,
+            token,
+            "/api/session/rename",
+            {"id": second, "title": "renamed"},
+        )
+        assert any(item["title"] == "renamed" for item in renamed["sessions"])
+
+        _, activated = _post(base_url, token, "/api/session/activate", {"id": first})
+        assert activated["active_id"] == first
+
+        _, deleted = _post(base_url, token, "/api/session/delete", {"id": first})
+        assert deleted["active_id"] == second
+        assert len(deleted["sessions"]) == 1
     finally:
         server.shutdown()
         server.server_close()

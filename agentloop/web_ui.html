@@ -13,6 +13,15 @@
         <span id="statusText">就绪</span>
       </div>
       <button
+        id="sessionsButton"
+        class="icon-button"
+        type="button"
+        title="会话列表"
+        aria-label="会话列表"
+      >
+        ≡
+      </button>
+      <button
         id="newSession"
         class="icon-button"
         type="button"
@@ -70,6 +79,24 @@
       <button id="allow" value="default" type="button">允许</button>
     </div>
   </form>
+</dialog>
+
+<dialog id="sessionDialog" aria-labelledby="sessionTitle">
+  <section class="session-manager">
+    <div class="session-manager-header">
+      <h2 id="sessionTitle">会话</h2>
+      <button
+        id="closeSessions"
+        class="icon-button"
+        type="button"
+        aria-label="关闭会话列表"
+        title="关闭"
+      >
+        ×
+      </button>
+    </div>
+    <div id="sessionList" class="session-list"></div>
+  </section>
 </dialog>
 
 <style>
@@ -444,6 +471,62 @@
     min-width: 72px;
   }
 
+  .session-manager {
+    padding: 16px;
+  }
+
+  .session-manager-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+  }
+
+  .session-manager-header h2 {
+    margin: 0;
+  }
+
+  .session-list {
+    max-height: min(520px, 70vh);
+    overflow-y: auto;
+    border-top: 1px solid #e4e7eb;
+  }
+
+  .session-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    gap: 8px;
+    align-items: center;
+    padding: 10px 0;
+    border-bottom: 1px solid #e4e7eb;
+  }
+
+  .session-row button {
+    min-height: 34px;
+    padding: 0 10px;
+  }
+
+  .session-row .session-open {
+    overflow: hidden;
+    border-color: transparent;
+    color: #34383f;
+    background: transparent;
+    text-align: left;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .session-row.active .session-open {
+    color: #1f5fc4;
+    background: #edf4ff;
+  }
+
+  .session-row .session-delete {
+    border-color: #d8a0a0;
+    color: #a52a2a;
+    background: #ffffff;
+  }
+
   .sr-only {
     position: absolute;
     width: 1px;
@@ -474,6 +557,14 @@
       grid-template-columns: minmax(0, 1fr) 64px;
       padding: 10px 12px;
     }
+
+    .session-row {
+      grid-template-columns: minmax(0, 1fr) auto;
+    }
+
+    .session-row .session-delete {
+      grid-column: 2;
+    }
   }
 </style>
 
@@ -492,8 +583,15 @@
   const denyButton = document.querySelector("#deny");
   const stopPermissionButton = document.querySelector("#stopPermission");
   const newSessionButton = document.querySelector("#newSession");
+  const sessionsButton = document.querySelector("#sessionsButton");
+  const sessionDialog = document.querySelector("#sessionDialog");
+  const sessionList = document.querySelector("#sessionList");
+  const closeSessionsButton = document.querySelector("#closeSessions");
+  const modelStatus = document.querySelector("#modelStatus");
   const tools = new Map();
   let activePermission = null;
+  let activeSessionId = null;
+  let sessions = [];
   let running = false;
 
   function setStatus(text, kind = "") {
@@ -510,6 +608,7 @@
     stopButton.textContent = "停止";
     stopPermissionButton.disabled = false;
     newSessionButton.disabled = value;
+    sessionsButton.disabled = value;
     promptInput.disabled = value;
   }
 
@@ -617,6 +716,83 @@
     }
   }
 
+  function renderSessionList() {
+    sessionList.replaceChildren();
+    for (const session of sessions) {
+      const row = document.createElement("div");
+      row.className =
+        session.id === activeSessionId ? "session-row active" : "session-row";
+
+      const open = document.createElement("button");
+      open.className = "session-open";
+      open.type = "button";
+      open.textContent = session.title;
+      open.title = session.title;
+      open.addEventListener("click", async () => {
+        if (session.id !== activeSessionId) {
+          await changeSession("/api/session/activate", { id: session.id });
+        }
+        sessionDialog.close();
+      });
+
+      const rename = document.createElement("button");
+      rename.className = "secondary";
+      rename.type = "button";
+      rename.textContent = "改名";
+      rename.addEventListener("click", async () => {
+        const title = window.prompt("会话名称", session.title)?.trim();
+        if (title) {
+          await changeSession("/api/session/rename", {
+            id: session.id,
+            title,
+          });
+        }
+      });
+
+      const remove = document.createElement("button");
+      remove.className = "session-delete";
+      remove.type = "button";
+      remove.textContent = "删除";
+      remove.addEventListener("click", async () => {
+        if (window.confirm(`删除会话“${session.title}”？`)) {
+          await changeSession("/api/session/delete", { id: session.id });
+        }
+      });
+
+      row.append(open, rename, remove);
+      sessionList.append(row);
+    }
+  }
+
+  function applySnapshot(data) {
+    renderSession(data.events || []);
+    activeSessionId = data.active_id || null;
+    sessions = data.sessions || [];
+    renderSessionList();
+    const active = sessions.find((session) => session.id === activeSessionId);
+    modelStatus.textContent = active?.title || "本地会话";
+    setRunning(data.active);
+    setStatus(data.active ? "运行中" : "就绪", data.active ? "busy" : "");
+    if (data.cancelling) {
+      stopButton.disabled = true;
+      stopButton.textContent = "停止中";
+      setStatus("停止中", "busy");
+    }
+    const pendingPermission = data.permissions?.[0];
+    if (pendingPermission) {
+      setStatus("等待授权", "busy");
+      showPermission(pendingPermission);
+    }
+  }
+
+  async function changeSession(path, body) {
+    try {
+      applySnapshot(await api(path, body));
+    } catch (error) {
+      addMessage("错误", error.message, "error");
+    }
+  }
+
   function showPermission(event) {
     activePermission = event.id;
     document.querySelector("#permissionReason").textContent = event.reason;
@@ -652,19 +828,7 @@
     });
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
-    renderSession(data.events);
-    setRunning(data.active);
-    if (running) setStatus("运行中", "busy");
-    if (data.cancelling) {
-      stopButton.disabled = true;
-      stopButton.textContent = "停止中";
-      setStatus("停止中", "busy");
-    }
-    const pendingPermission = data.permissions?.[0];
-    if (pendingPermission) {
-      setStatus("等待授权", "busy");
-      showPermission(pendingPermission);
-    }
+    applySnapshot(data);
   }
 
   async function resolvePermission(allowed) {
@@ -698,6 +862,14 @@
       case "run_start":
         setRunning(true);
         setStatus("运行中", "busy");
+        const active = sessions.find(
+          (session) => session.id === activeSessionId,
+        );
+        if (active?.title === "新会话") {
+          active.title = event.prompt.slice(0, 40);
+          modelStatus.textContent = active.title;
+          renderSessionList();
+        }
         break;
       case "model_start":
         setStatus(`思考中 · 第 ${event.turn} 轮`, "busy");
@@ -744,6 +916,12 @@
         break;
       case "session_error":
         addMessage("错误", event.message, "error");
+        break;
+      case "session_changed":
+      case "session_list_changed":
+        loadSession().catch((error) => {
+          addMessage("错误", error.message, "error");
+        });
         break;
       case "cancel_requested":
         stopButton.disabled = true;
@@ -807,15 +985,15 @@
   stopButton.addEventListener("click", stopRun);
   stopPermissionButton.addEventListener("click", stopRun);
   newSessionButton.addEventListener("click", async () => {
-    if (running || !window.confirm("清空当前工作区的会话记录？")) return;
-    try {
-      await api("/api/session/reset", {});
-      clearSessionView();
-      setStatus("就绪");
-    } catch (error) {
-      addMessage("错误", error.message, "error");
-    }
+    if (running) return;
+    await changeSession("/api/session/create", {});
+    promptInput.focus();
   });
+  sessionsButton.addEventListener("click", () => {
+    renderSessionList();
+    sessionDialog.showModal();
+  });
+  closeSessionsButton.addEventListener("click", () => sessionDialog.close());
   loadSession().catch((error) => {
     setStatus("恢复失败", "error");
     addMessage("错误", error.message, "error");

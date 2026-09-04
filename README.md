@@ -24,7 +24,7 @@ Fallback 和离线测试。
 
 - 核心循环只负责“调用模型 -> 执行工具 -> 回填结果”；
 - 工具、权限、Hooks、压缩和模型协议各自有明确边界；
-- 52 项测试使用 `MockClient` 回放，不需要网络或 API Key；
+- 完整测试套件使用 `MockClient` 回放，不需要网络或 API Key；
 - 文档明确说明教学实现与生产级系统之间的差距。
 
 > [!IMPORTANT]
@@ -83,8 +83,8 @@ python -m agentloop
 agentloop web
 ```
 
-Web 会话按工作区自动保存。运行中可点击“停止”取消任务；正在执行的 `bash`
-命令会终止整个子进程组。
+Web 会话按工作区自动保存，支持创建、切换、改名和删除。运行中可点击“停止”
+取消任务；正在执行的 `bash` 命令会终止整个子进程组。
 
 不配置模型也能运行全部离线测试：
 
@@ -147,7 +147,7 @@ sequenceDiagram
 | 上下文压缩 | 转存、归档、占位、摘要四级管线 | [`compact.py`](agentloop/compact.py) |
 | 模型路由 | OpenAI 兼容协议、Anthropic 原生协议、Mock、Fallback | [`models.py`](agentloop/models.py) |
 | CLI | 单次任务、保留历史的 REPL、token 统计 | [`cli.py`](agentloop/cli.py) |
-| Web UI | SSE 事件、权限审批、会话持久化、任务取消 | [`web.py`](agentloop/web.py) |
+| Web UI | SSE 事件、权限审批、多会话持久化、任务取消 | [`web.py`](agentloop/web.py) |
 
 ### 内置工具
 
@@ -261,11 +261,7 @@ make check
 CI 使用 Python 3.10–3.13 矩阵执行同样的 Ruff 和 Pytest 检查。格式与静态规则
 统一定义在 `pyproject.toml`，编辑器基础行为定义在 `.editorconfig`。
 
-测试全部离线运行：
-
-```text
-52 passed
-```
+测试全部离线运行，具体数量以 `pytest -q` 输出为准。
 
 ## 项目边界
 
@@ -273,8 +269,9 @@ CI 使用 Python 3.10–3.13 矩阵执行同样的 Ruff 和 Pytest 检查。格�
 
 - 生产级 shell 沙箱；
 - Subagent、MCP、Skills、长期记忆和任务图；
-- 流式输出与图形界面；
-- 持久化会话数据库；
+- Token 流式输出；
+- 多用户服务端数据库和远程访问；
+- 桌面安装包；
 - 多工具并发执行。
 
 这些能力不应直接塞进核心循环。合适的扩展位置分别是工具层、Hook、上下文层或模型

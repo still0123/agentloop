@@ -132,7 +132,7 @@ python -m agentloop
 make check
 ```
 
-它依次执行格式检查、静态检查和 52 项单元测试。
+它依次执行格式检查、静态检查和完整的离线单元测试。
 
 ---
 
@@ -148,8 +148,10 @@ agentloop/
 │   ├── compact.py     # 四级上下文压缩
 │   ├── models.py      # 模型协议适配、路由、重试、Fallback
 │   ├── cli.py         # 默认组装与 REPL
+│   ├── web.py         # 本地 Web 服务、事件、会话与权限审批
+│   ├── web_ui.html    # 浏览器交互界面
 │   └── __main__.py    # python -m agentloop
-├── tests/             # 52 项离线测试
+├── tests/             # 离线测试套件
 ├── docs/              # 学习文档
 ├── .env.example       # 模型配置模板
 ├── Makefile           # 常用开发命令
@@ -166,6 +168,8 @@ flowchart TD
     CLI --> Hooks["hooks.py<br/>扩展点"]
     CLI --> Gate["permission.py<br/>权限策略"]
     CLI --> Compact["compact.py<br/>上下文压缩"]
+    Web["web.py<br/>本地 Web 与会话"] --> CLI
+    Web --> Agent
 
     Agent --> Models
     Agent --> Tools
@@ -866,7 +870,7 @@ session = result.messages
 
 ```mermaid
 flowchart TD
-    Tests["52 项离线测试"] --> Loop["Agent Loop"]
+    Tests["离线测试套件"] --> Loop["Agent Loop"]
     Tests --> Tools["工具与路径边界"]
     Tests --> Hooks["Hook 控制流"]
     Tests --> Permission["拒绝与审批"]
@@ -976,7 +980,7 @@ AgentLoop 是教学与实验 Harness，不应直接当作生产级远程执行�
 | `.env` 解析简单 | 不支持复杂语法 | 进程环境或成熟配置库 |
 | token 用字符数估算 | 与真实 tokenizer 有偏差 | 按模型接入 tokenizer |
 | 摘要由当前模型生成 | 可能遗漏事实 | 结构化状态 + 摘要校验 |
-| 无持久会话数据库 | 重启后只剩 transcript | 受控持久化与恢复协议 |
+| 会话保存为本地 JSON | 适合单机单用户，不支持多进程并发写 | 数据库、文件锁或单写服务 |
 | 无流式输出 | 长回答等待感明显 | SSE/streaming 适配 |
 
 生产化之前至少要明确四个信任边界：
