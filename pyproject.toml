@@ -5,12 +5,12 @@ build-backend = "hatchling.build"
 [project]
 name = "agentloop"
 version = "0.1.1"
-description = "AgentLoop — a minimal coding agent harness: agent loop, tool dispatch, permission gates, hooks, context compaction, and multi-provider model routing."
+description = "AgentLoop — an extensible agent runtime for local tasks, with tool dispatch, permission gates, hooks, context management, and multi-provider model routing."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "AgentLoop contributors" }]
-keywords = ["agent", "llm", "coding-agent", "harness", "tool-use"]
+keywords = ["agent", "llm", "agent-runtime", "context-management", "tool-use"]
 dependencies = ["httpx>=0.27"]
 
 [project.urls]
