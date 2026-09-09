@@ -8,8 +8,8 @@
 
 集成上下文工程、会话记忆、权限管理和工具执行，支持命令行、Web 与 macOS 桌面使用。
 
-[核心能力](#核心能力) · [快速开始](#快速开始) · [架构](#架构) ·
-[设计选型与验证](docs/context-design.md) · [实现详解](docs/study-guide.md) · [开发与测试](#开发与测试)
+[整体模块](#核心能力) · [状态与存储](#状态与存储) · [关键链路](#关键链路只读日志分析) ·
+[方案与验证](#方案选择与验证) · [快速开始](#快速开始) · [实现手册](docs/study-guide.md)
 
 </div>
 
@@ -52,6 +52,184 @@ AgentLoop 是我开发的本地 Coding Agent，围绕“理解任务、调用工
 
 工具注册表与 Agent 主循环分离；输入、工具执行前后和任务停止四类 Hook 提供扩展点，
 便于接入输入处理、权限策略和执行记录。当前权限规则基于模式匹配，不提供生产级 Shell 沙箱隔离。
+
+## 架构
+
+```mermaid
+flowchart TD
+    User["用户任务"] --> Submit["UserPromptSubmit Hook"]
+    Submit --> Loop["Agent.run<br/>唯一循环"]
+    Loop --> Compact["Compactor.prepare"]
+    Compact --> Model["ModelClient.complete"]
+    Model --> Decision{"有 tool_use？"}
+    Decision -->|否| Stop["Stop Hook"]
+    Stop -->|允许结束| Answer["最终回答"]
+    Stop -->|强制继续| Loop
+    Decision -->|是| Pre["PreToolUse Hooks"]
+    Pre --> Gate["PermissionGate"]
+    Gate -->|拒绝| Result["tool_result"]
+    Gate -->|放行| Toolbox["Toolbox.execute"]
+    Toolbox --> Post["PostToolUse Hooks"]
+    Post --> Result
+    Result --> Loop
+```
+
+这里的 ReAct 循环是“模型选择行动 → 工具执行 → 观察结果 → 再次决定”。
+`Agent.run` 维护同一份消息历史；增加工具改工具箱，增加执行策略注册 Hook，接入模型改协议适配。
+
+## 状态与存储
+
+对话需要保留顺序，工具需要按名称查找，所以我分别使用 List 和 Map。运行状态分布在
+`Agent`、`Compactor`、工具箱和会话存储中，没有把它们合成一个统一的 `AgentState`。
+
+| 状态 | 数据结构 | 保存什么、存在哪里 |
+|---|---|---|
+| `messages` | `list[dict]` | 内存中的有序对话；`role` 表示角色，`content` 保存文本或消息块。Web 会话会将它持久化为 JSON |
+| 工具调用与结果 | 消息内的 `list[dict]` | 调用含 `type / id / name / input`；结果含 `type / tool_use_id / content`，通过 ID 配对 |
+| 请求来源 | 消息上的字符串字段 | `_request_id` 标识本次输入，`_request_text` 保存入口原文；发给提供商前移除这些内部字段 |
+| 工具注册表 | `dict[str, ToolDef]` | 内存中按名称查找工具描述、参数 schema 和 handler；handler 不序列化到会话 |
+| 计划与循环进度 | List、整数、Dict | 运行期状态：`TodoManager.items` 保存 `content / status`；`turns / reactive_retries / todo_gap` 记录轮数、补救次数与提醒间隔，`usage` 记录主循环用量 |
+| `user_requests` | `list[dict]` | 检查点中的用户原文记录，每项为 `source_id + text`；有序保留早期要求和后续修改 |
+| `current_request / summary` | `str` | 当前用户原文与模型生成的历史摘要；都直接放进检查点文本 |
+| `transcript / pending_transcripts` | `str / list[str]` | 压缩前消息快照路径、尚未完成摘要的历史路径；原文保存在 `.transcripts/*.json` |
+| 大工具结果 | 文本文件与路径引用 | 原文保存在 `.task_outputs/tool-results/<SHA-256>.txt`，消息改为采样片段或文件引用 |
+| 检查点版本与状态 | 整数、字符串 | `schema_version / revision / summarized_messages / mode / summary_error` 记录格式版本、摘要进度和失败类型 |
+
+`CompactionState` 是 dataclass，经 `asdict()` 转为 JSON 文本，放在一条带 `[Compacted]`
+标记的消息里；它仍属于 `messages`。`CompactionReport` 另行记录最近一次压缩的前后字符数、
+摘要调用与用量、预算估算值和是否降级，便于诊断。
+
+计划对象、循环计数与压缩诊断对象不会随 Web 会话恢复；主循环用量可从 `RunResult` 或事件读取。
+
+短期记忆就是当前消息、摘要和执行进度。长期保存包括工具原文、历史归档与 Web 会话 JSON：
+默认会话文件位于 `~/.agentloop/sessions/<workspace-hash>.json`，会话条目保存
+`id / title / created_at / updated_at / messages / events`。恢复消息不等于恢复执行中的程序栈，
+也不等于跨会话知识提取或语义检索。
+
+代码入口：[循环状态](agentloop/agent.py) · [压缩状态](agentloop/compact.py) ·
+[工具与计划](agentloop/tools.py) · [Web 会话存储](agentloop/web.py)
+
+## 关键链路：只读日志分析
+
+以用户输入“只检查日志原因，不修改文件”为例，沿同一个 ReAct 循环看状态怎样变化。
+下面的 ID、路径和摘要是讲解示例；可重复运行的验证见下一节。
+
+### 1. 接收请求，进入模型与工具循环
+
+`Agent.run()` 保存入口原文，执行 `UserPromptSubmit` Hook，再向 `messages` 追加用户消息。
+每轮调用模型前都运行 `prepare(messages, current_request=..., system_prompt=..., tools=...)`。
+模型返回 `tool_use` 时，程序经过 `PreToolUse` 权限检查，按工具名分发执行，再将结果作为
+`tool_result` 追加到历史，回到下一轮 `prepare()`。
+
+例如，模型请求 `bash(command="cat service.log")`，调用 ID 为 `t1`。执行结果通过
+`tool_use_id="t1"` 关联回该调用。权限拒绝也会生成结果，让模型看到拒绝原因并调整后续动作。
+
+这里的“只读”原文会被保留并传给模型；默认权限规则检查 Shell 禁止模式和风险关键词，
+尚未把自然语言要求编译成所有写工具的强制禁用策略。
+
+### 2. 大结果先落盘，预算满足就继续
+
+假设该工具返回 120,000 字符日志。下一轮 `prepare()` 发现消息超过默认的 50,000 字符限制，
+即使最新批次尚未超过 200,000 字符，也会转存大结果。**工具调用 ID 和结果关联保持不变，
+改变的是结果的 `content`。**
+
+```text
+处理前
+assistant: tool_use(id=t1, name=bash, input={command: "cat service.log"})
+user:      tool_result(tool_use_id=t1, content="120,000 字符日志……")
+
+处理后
+assistant: tool_use(id=t1, name=bash, input={command: "cat service.log"})
+user:      tool_result(tool_use_id=t1, content="首部、错误片段、尾部……
+           Full output: .task_outputs/tool-results/<hash>.txt")
+```
+
+完整预算还包括 `system + tools + messages`。默认应用窗口为 64,000，减去 8,000 输出预留和
+2,000 安全余量，输入目标是 54,000 个估算单位；默认用 UTF-8 字节数保守估算，可替换计数器。
+这是应用预算，未自动探测提供商真实窗口，也不是精确 tokenizer。
+
+若落盘和旧结果占位后，两项预算都满足且消息不超过 50 条，就直接把新列表交给模型，
+**这一阶段无需调用摘要模型，也不会创建新的摘要检查点。**
+
+### 3. 历史继续增长时，才生成增量检查点
+
+后续多轮执行使消息超过 50 条，或者仍不能满足预算时，`_compact()` 归档当前消息快照，
+通常保留最近五条消息，并在切点处保护完整工具调用组。较早历史和此前待处理归档作为新增输入，
+与 `previous_summary` 一起交给摘要模型。
+
+```text
+压缩前 messages
+[旧检查点（如有）, 新增历史, 近期工具调用与结果]
+
+压缩后 messages
+[user: "[Compacted]\n{用户原文记录、摘要、归档路径、待处理路径、版本等}",
+ 近期工具调用与结果]
+```
+
+摘要输入中的工具结果采用首尾和错误片段采样，调用信息保留名称与参数片段。
+摘要预算按时间顺序容纳完整消息组；待摘要批次中尚未发送的历史会归档，`pending_transcripts`
+保存这些路径，后续再次触发摘要时重放。近期消息仍保留在 `messages`，最终预算检查也可进一步归档它们。
+
+假设用户随后输入“继续”，在下一次压缩后，用户原文记录包含两条要求：
+
+```json
+[
+  {"source_id": "request-1", "text": "只检查日志原因，不修改文件"},
+  {"source_id": "request-2", "text": "继续"}
+]
+```
+
+这些原文由程序维护，摘要不能改写它们。输入 Hook 的改写不覆盖入口原文，Stop Hook 注入的
+内部续跑消息也不会成为用户要求。程序尚未自动提取、合并生效约束，后续明确修改由模型结合原文理解。
+
+### 4. 回读与失败后怎样接回执行
+
+`prepare()` 返回的列表会重新赋给当前循环的 `messages`，随后发送同一个系统提示和工具定义。
+模型需要旧日志细节时，调用 `search_file(path, query)` 定位行号，再调用
+`read_file(path=..., offset=..., limit=...)` 分页读取；回读结果仍经 `tool_result` 进入下一轮循环。
+
+| 情况 | 状态怎样处理 | 后续执行 |
+|---|---|---|
+| 摘要失败、为空、过长或被提供商标记为截断 | 不提交该摘要；优先保留上次有效摘要，新增历史写入待处理归档 | 最终预算满足时继续；以后再次摘要时重放待处理历史 |
+| 提供商报告上下文超限 | `reactive_compact()` 降低目标预算，重新归档与压缩 | 返回同一个循环，默认每次 `run` 最多补救一次 |
+| 用户原文或固定请求内容仍使最终预算超限 | 抛出 `ContextBudgetError` | 明确结束本次运行，不靠静默删除用户要求解决 |
+| 归档写入失败、程序错误或取消 | 向上传播错误或取消信号 | 不把失败伪装成已成功保存 |
+
+回读是模型显式发起的工具调用，当前没有自动语义召回器。文件工具有工作区和输出范围限制；
+Shell 工具在 200,000 字符处已截掉的原始输出，无法再由压缩器恢复。
+
+沿代码讲解：[Agent._run](agentloop/agent.py) → [Compactor.prepare / _compact](agentloop/compact.py)
+→ [RequestBudget](agentloop/budget.py) → [Toolbox.execute](agentloop/tools.py)。
+
+## 方案选择与验证
+
+我的选择依据是：开发任务中的日志与文件需要可回读，用户要求需要跨多轮保留，摘要服务失败后
+也要有明确的恢复路径。因此采用**程序归档与采样，加增量摘要**。
+
+| 方案 | 优点 | 代价与取舍 |
+|---|---|---|
+| 程序截断或滑动窗口 | 简单、确定，无摘要调用 | 可能直接丢掉早期约束和证据；只作为局部减量策略 |
+| 结构化提取 | 目标、决定、约束等字段便于查询 | 需处理遗漏、来源、冲突和过期；当前采用程序状态字段，未实现完整语义知识提取 |
+| 单独模型摘要 | 能概括复杂语义 | 依赖模型质量和可用性，具体证据与用户要求可能遗漏 |
+| 本项目的组合方案 | 大结果可直接落盘，原文可回读，摘要失败可重放 | 增加磁盘 I/O 和回读调用；摘要仍是有损概括 |
+
+我验证的是这些机制是否按预期工作。以下离线回放使用相同输入和固定摘要，比较修复前提交
+`5154aa2` 与实现提交 `87316f6`；没有将框架举例当成已核验的横向效果排名。
+
+| 场景 | 修复前 | 当前实现 |
+|---|---|---|
+| 最新工具输出 120,000 字符 | 处理后消息仍有 120,458 字符，摘要调用 1 次 | 1,577 字符，摘要调用 0 次，尾部错误可见、落盘原文回读一致 |
+| 摘要输入保留日志中部错误和尾部标记 | 两者均遗漏 | 两者均包含 |
+| “只读”后输入“继续”，连续两次固定摘要都漏掉约束 | 压缩上下文丢失先前只读要求 | 用户原文记录仍保留要求 |
+| 第二次增量摘要失败 | 无待处理历史重放字段 | 旧摘要保留，待处理历史在第三次摘要调用中重放 |
+
+实现提交 `87316f6` 的完整验证为 **144 项测试通过，Ruff 检查通过**。上述数字衡量消息 JSON
+字符数和控制流程，不能直接换算成 Token 费用、真实任务成功率或模型语义正确率。
+真实模型下的跨方案质量、总调用成本和端到端耗时还需要单独测评。
+
+复现入口：[回放脚本](scripts/benchmark_context_policy.py) ·
+[原始结果](docs/evidence/context-policy-replay.json) ·
+[行为测试](tests/test_context_policy.py) · [完整设计说明](docs/context-design.md)
 
 ## 快速开始
 
@@ -150,49 +328,6 @@ ls dist/installers/
 make check
 ```
 
-## 架构
-
-```mermaid
-flowchart TD
-    User["用户任务"] --> Submit["UserPromptSubmit Hook"]
-    Submit --> Loop["Agent.run<br/>唯一循环"]
-    Loop --> Compact["Compactor.prepare"]
-    Compact --> Model["ModelClient.complete"]
-    Model --> Decision{"有 tool_use？"}
-    Decision -->|否| Stop["Stop Hook"]
-    Stop -->|允许结束| Answer["最终回答"]
-    Stop -->|强制继续| Loop
-    Decision -->|是| Pre["PreToolUse Hooks"]
-    Pre --> Gate["PermissionGate"]
-    Gate -->|拒绝| Result["tool_result"]
-    Gate -->|放行| Toolbox["Toolbox.execute"]
-    Toolbox --> Post["PostToolUse Hooks"]
-    Post --> Result
-    Result --> Loop
-```
-
-一次工具调用通常需要两轮模型请求：
-
-```mermaid
-sequenceDiagram
-    actor U as 用户
-    participant A as Agent
-    participant M as 模型
-    participant T as 工具
-
-    U->>A: 读取 README.md
-    A->>M: 用户消息 + 工具定义
-    M-->>A: tool_use(read_file)
-    A->>T: 执行 read_file
-    T-->>A: 文件内容
-    A->>M: tool_result
-    M-->>A: 最终回答
-    A-->>U: 返回结果
-```
-
-`Agent.run` 是唯一循环。增加工具只改工具箱，增加策略只注册 Hook，接入新模型只改
-适配边界。
-
 ## 已实现能力
 
 | 能力 | 实现 | 代码入口 |
@@ -202,7 +337,7 @@ sequenceDiagram
 | 权限闸门 | 硬拒绝、风险识别、人工审批 | [`permission.py`](agentloop/permission.py) |
 | 生命周期 Hooks | 输入、执行前、执行后、停止四个事件 | [`hooks.py`](agentloop/hooks.py) |
 | 计划约束 | `todo_write` 状态校验和三轮提醒 | [`tools.py`](agentloop/tools.py) |
-| 上下文压缩 | 转存、归档、占位、摘要四级管线 | [`compact.py`](agentloop/compact.py) |
+| 上下文压缩 | 完整请求预算、原文归档、增量摘要与失败重放 | [`compact.py`](agentloop/compact.py) |
 | 模型路由 | OpenAI 兼容协议、Anthropic 原生协议、Mock、Fallback | [`models.py`](agentloop/models.py) |
 | CLI | 单次任务、保留历史的 REPL、token 统计 | [`cli.py`](agentloop/cli.py) |
 | Web UI | Token 流式、断线重放、权限审批、多会话、任务取消 | [`web.py`](agentloop/web.py) |
@@ -219,28 +354,6 @@ sequenceDiagram
 | `edit_file` | 精确替换首个匹配 | 工作区路径限制 |
 | `glob` | 查找文件 | 数量上限 |
 | `todo_write` | 更新会话计划 | 数量和状态校验 |
-
-## 上下文压缩
-
-压缩按信息损失和成本从低到高执行；完整请求预算包含 `system + tools + messages`。默认以 UTF-8 字节作保守估计，不是精确 tokenizer，部署方可注入对应模型的估算器。
-
-```mermaid
-flowchart LR
-    S1["1. Spill<br/>大结果落盘"] --> S2["2. Placeholder<br/>旧结果引用"]
-    S2 --> S3["3. Checkpoint<br/>归档并保留近期调用组"]
-    S3 --> S4["4. Incremental summary<br/>摘要新增历史"]
-
-    S1 -.-> O1["零 API 成本"]
-    S2 -.-> O1
-    S3 -.-> O1
-    S4 -.-> O2["一次模型调用"]
-```
-
-管线始终保护 `tool_use` 与 `tool_result` 的配对关系。大结果会先保存到
-`.task_outputs/`，完整历史会归档到 `.transcripts/`；记录不会由本机制自动删除。模型可用 `search_file` 定位归档，再用 `read_file` 的 `offset/limit` 分页回读。
-
-当前字段、预算与重放流程见 **[上下文设计与验证](docs/context-design.md)**；
-基础消息配对原理见 [实现详解](docs/study-guide.md#9-上下文压缩)。
 
 ## 模型配置
 
@@ -287,7 +400,7 @@ AGENTLOOP_CONTEXT_MARGIN=2000
 3. `Agent.run` 核心循环逐段解析；
 4. 工具注册、异常回填和工作区路径保护；
 5. Hook 短路规则与三道权限闸门；
-6. 四级上下文压缩和消息配对保护；
+6. 完整请求预算、增量检查点、原文回读和消息配对保护；
 7. OpenAI / Anthropic 协议适配、重试与 Fallback；
 8. 测试证据、扩展练习和生产化边界。
 
@@ -343,7 +456,7 @@ CI 使用 Python 3.10–3.13 矩阵执行同样的 Ruff 和 Pytest 检查。格�
 
 这些能力不应直接塞进核心循环。合适的扩展位置分别是工具层、Hook、上下文层或模型
 适配层。具体风险与演进方向见
-[学习手册的生产化章节](docs/study-guide.md#14-边界风险与生产化方向)。
+[实现手册的生产化章节](docs/study-guide.md#14-边界风险与生产化方向)。
 
 ## License
 

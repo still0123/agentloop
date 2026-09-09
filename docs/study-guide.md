@@ -1,11 +1,6 @@
-# AgentLoop 学习手册
+# AgentLoop 实现手册
 
-> 上下文压缩已增加本次请求保留、原文回读和摘要失败降级。
-> 最新字段、控制流与实验见 [上下文工程设计与验证](context-design.md)；
-> 本手册中的压缩片段用于理解基础机制，具体行为以该文档和当前源码为准。
-
-
-> 从 30 行左右的核心循环出发，读懂一个 Coding Agent Harness 如何连接模型、
+> 从一次请求进入 Loop 到上下文归档与回读，读懂一个 Coding Agent 如何连接模型、
 > 工具、权限、上下文与命令行。
 
 本文对应 AgentLoop `0.1.1`。它不是“调用一次大模型 API”的示例，而是一套可运行、
@@ -150,7 +145,8 @@ agentloop/
 │   ├── tools.py       # 工具定义、注册与执行
 │   ├── hooks.py       # 四类生命周期 Hook
 │   ├── permission.py  # bash 权限闸门
-│   ├── compact.py     # 四级上下文压缩
+│   ├── budget.py      # 完整请求的本地预算估算
+│   ├── compact.py     # 分级上下文管理与检查点
 │   ├── models.py      # 模型协议适配、路由、重试、Fallback
 │   ├── cli.py         # 默认组装与 REPL
 │   ├── web.py         # 本地 Web 服务、事件、会话与权限审批
@@ -363,18 +359,37 @@ Hook 可以替换输入。典型用途是注入仓库规则、当前分支或用
 
 ```python
 messages = list(messages) if messages else []
-messages.append({"role": "user", "content": user_input})
+messages.append(
+    {
+        "role": "user",
+        "content": user_input,
+        "_request_id": "...",
+        "_request_text": original_request,
+    }
+)
 ```
 
-浅复制列表避免直接修改调用方传入的历史。消息字典本身不会在这里深复制，后续压缩步骤
-可能更新其中的工具结果，因此调用方应把返回的 `RunResult.messages` 作为下一轮历史。
+浅复制列表避免直接修改调用方传入的历史。每个外部用户请求还会生成 `_request_id`，并保存
+入口原文 `_request_text`：输入 Hook 即使改写了送往模型的内容，检查点中的 `user_requests`
+仍可保存用户最初写下的要求。发送给模型前，这些内部字段会被移除；调用方仍应把返回的
+`RunResult.messages` 作为下一轮历史。
 
 ### 6.3 每轮先压缩，再调用模型
 
 ```python
 while True:
-    messages = self.compactor.prepare(messages)
-    response = self.client.complete(self.system_prompt, messages, self.toolbox.defs)
+    messages = self.compactor.prepare(
+        messages,
+        current_request=original_request,
+        system_prompt=self.system_prompt,
+        tools=self.toolbox.defs,
+    )
+    model_messages = [
+        {k: v for k, v in message.items()
+         if k not in {"_request_id", "_request_text", "_origin"}}
+        for message in messages
+    ]
+    response = self.client.complete(self.system_prompt, model_messages, self.toolbox.defs)
 ```
 
 循环没有“规划”“权限”“路由”等分支。它只做两件事：
@@ -387,14 +402,19 @@ while True:
 ```python
 except Exception as exc:
     if reactive_retries < self.reactive_retries and _is_prompt_too_long(exc):
-        messages = self.compactor.reactive_compact(messages)
+        messages = self.compactor.reactive_compact(
+            messages,
+            current_request=original_request,
+            system_prompt=self.system_prompt,
+            tools=self.toolbox.defs,
+        )
         reactive_retries += 1
         continue
     raise
 ```
 
-字符数只能粗估 token。即使主动压缩认为没超限，API 仍可能返回
-`prompt_too_long`。此时旧历史会被更激进地摘要，然后重试一次。
+完整请求预算使用本地估算器，默认也不是厂商精确 tokenizer。即使主动压缩认为没超限，API
+仍可能返回 `prompt_too_long`。此时历史会按更小目标重新 checkpoint、落盘和压缩，然后重试一次。
 
 这里重试的是“重新组织输入”，不是盲目重复相同请求。
 
@@ -497,7 +517,8 @@ flowchart LR
 | 工具 | 作用 | 关键约束 |
 |---|---|---|
 | `bash` | 在工作区运行 shell 命令 | 60 秒默认超时，输出最多 200,000 字符 |
-| `read_file` | 读取 UTF-8 文本 | 路径必须位于工作区 |
+| `read_file` | 分页读取 UTF-8 文本 | 路径必须位于工作区；`offset` 为 1 起始行，单页有行数和字符上限 |
+| `search_file` | 在文本中定向查找字面量 | 返回带行号的有限上下文；限制匹配数、扫描量与输出大小 |
 | `write_file` | 创建或覆盖文本 | 自动创建父目录 |
 | `edit_file` | 替换首个匹配文本 | 找不到旧文本时返回错误 |
 | `glob` | 按模式查找文件 | 最多回传 500 个结果 |
@@ -612,81 +633,122 @@ Agent 每一轮都会把模型回复和工具结果追加到历史中。读取�
 - 尚未完成的约束；
 - 可恢复的大输出路径。
 
-### 9.2 四级管线
+### 9.2 状态与完整请求预算
+
+`messages` 是按发生顺序保存的 `list[dict]`：它便于追加消息、按位置切片和保护工具调用配对。
+工具箱使用 `dict[str, ToolDef]`，按名称查 handler。每次模型调用前，
+`Agent` 把系统提示、工具定义和消息传给 `Compactor.prepare(...)`；它计算的是完整请求，
+不是只计算消息文本。
+
+`RequestBudget` 将 `system + tools + messages` 的序列化内容及协议包装开销相加，并预留模型
+输出与安全余量。默认估算器按 UTF-8 字节数计数，方便在没有厂商 tokenizer 时保守控制大小；
+它不是任何提供商的精确 token 数。CLI 默认窗口为 64,000、输出预留 8,000、安全余量 2,000，
+均可通过 `AGENTLOOP_CONTEXT_TOKENS`、`AGENTLOOP_MAX_TOKENS`、`AGENTLOOP_CONTEXT_MARGIN`
+调整。消息 JSON 的 `char_limit` 也要满足。
+
+压缩状态放进一条带 `[Compacted]` 或 `[Reactive compact]` 前缀的 user 消息：
+
+| 字段 | 保存内容 |
+|---|---|
+| `current_request` | 当前用户请求原文，兼容旧检查点 |
+| `user_requests` | 有序 List；每项含 `source_id` 与原始 `text`，不是模型摘要 |
+| `summary` | 上次有效摘要加本次新增历史得到的增量摘要 |
+| `transcript` | 本次压缩前完整消息快照的相对路径 |
+| `pending_transcripts` | 摘要失败、截断或当前预算放不下时待下次重放的归档路径 List |
+| `revision`、`summarized_messages` | 检查点演进计数 |
+| `mode`、`summary_error`、`schema_version` | 降级状态、错误类型和格式版本 |
+
+大工具结果原文保存为 `.task_outputs/tool-results/<sha256>.txt`，内容以哈希命名而非模型给出的
+调用 ID；压缩前消息快照或待重放增量保存为 `.transcripts/transcript-时间-随机值.json`。两类路径都是
+相对工作区的字符串。
+这些文件提供可回读证据，并不构成跨会话的语义长期记忆或自动知识召回。
+
+### 9.3 分级处理：先归档，再决定是否摘要
 
 ```mermaid
 flowchart LR
-    Input["完整 messages"] --> Spill["1. spill<br/>大结果转存"]
-    Spill --> Snip["2. snip<br/>旧历史归档"]
-    Snip --> Placeholder["3. placeholder<br/>旧结果占位"]
-    Placeholder --> Limit{"仍超过字符阈值？"}
-    Limit -->|否| Ready["发送给模型"]
-    Limit -->|是| Summary["4. summarize<br/>模型摘要"]
-    Summary --> Ready
-
-    Spill -.-> Disk1[".task_outputs/"]
-    Snip -.-> Disk2[".transcripts/"]
-    Summary -.-> Disk2
+    Input["完整请求<br/>system + tools + messages"] --> Spill["spill<br/>大结果落盘并采样"]
+    Spill --> Placeholder["placeholder<br/>已消费旧结果只留路径"]
+    Placeholder --> Check{"条数、字符与<br/>完整请求预算都满足？"}
+    Check -->|是| Ready["发送给模型"]
+    Check -->|否| Checkpoint["checkpoint<br/>归档历史、保留近期调用组"]
+    Checkpoint --> Summary["增量摘要<br/>仅必要时调用模型"]
+    Summary --> FinalCheck{"最终预算满足？"}
+    FinalCheck -->|是| Ready
+    FinalCheck -->|否| Error["ContextBudgetError"]
+    Spill -.-> Outputs[".task_outputs/"]
+    Checkpoint -.-> Transcripts[".transcripts/"]
 ```
 
-顺序从低成本、低损失走向高成本、高损失：
-
-| 阶段 | 触发条件 | 动作 | API 成本 |
+| 阶段 | 触发条件 | 动作 | 摘要接口调用 |
 |---|---|---|---|
-| spill | 最新工具结果批次超过预算 | 大结果落盘，消息保留预览和路径 | 0 |
-| snip | 消息条数超过上限 | 完整历史归档，保留头尾 | 0 |
-| placeholder | 旧工具结果过长 | 替换为占位符或落盘路径 | 0 |
-| summarize | 字符估算仍超限 | 调模型生成事实摘要 | 1 次调用 |
+| spill | 最新工具结果批次过大，或完整请求已经超预算 | 原文落盘；消息保留首尾及错误片段和路径 | 0 |
+| placeholder | 较早工具结果超过占位阈值 | 保存原文后替换为可回读路径 | 0 |
+| checkpoint / summary | 消息数量、字符限制或完整请求预算仍不满足 | 归档完整历史，保留近期调用组；对未概括增量做摘要 | 最多 1 |
+| fallback | 摘要失败、摘要响应被截断或仍无法装入预算 | 优先保留旧摘要与原文路径，未处理增量进入待重放队列 | 不增加调用 |
 
-### 9.3 为什么 spill 必须最先
+`prepare` 不再调用旧的 `_snip` 管线；`_snip` 仅保留为兼容性的内部辅助方法。实际主路径是
+`spill → placeholder → checkpoint/增量摘要`。大结果也不保证会先完整送到模型：如果它本身
+会超预算，程序先保存原文，再让模型看到有界预览与回读位置。
+
+### 9.4 原文怎样落盘与回读
 
 假设一个工具返回 100,000 字符：
 
 ```mermaid
 flowchart TD
     Full["完整结果 100k"] --> Save["先写入磁盘"]
-    Save --> Preview["消息保留 2k 预览 + 文件路径"]
-    Preview --> Later["后续可替换为仅路径"]
+    Save --> Preview["消息保留首尾、错误片段 + 文件路径"]
+    Preview --> Recall["search_file 定位，再分页 read_file"]
 ```
 
-如果先做占位，完整内容还没有恢复地址就被删掉，信息不可逆丢失。先落盘后占位，模型仍
-可以通过 `read_file` 找回完整内容。
+`spill` 针对最新一批过大的工具结果，先写原文再放预览，并复用已有的有效原文引用。
+`placeholder` 针对较早的已消费结果，也会先保存原文或复用已有引用，才替换成路径；两者都不
+通过“直接删除文本”减量。模型需要细节时可以先 `search_file` 找到证据行，再用
+`read_file(path=..., offset=..., limit=...)` 分页读取。
 
-### 9.4 已读与未读
+### 9.5 采样、配对与回读
 
-`_placeholder` 把最后一批工具结果视为“未读”：
+落盘预览不是只截取开头：`_sample_text` 保留首尾，并抽取 `error`、`exception`、
+`failed`、`fatal`、`traceback`、`exit code` 附近片段。摘要输入也会保留近期证据和工具名、
+参数、结果的关联。工具层的 shell 输出超过 200,000 字符时已经截断，这部分无法由压缩层恢复。
 
-```text
-assistant: tool_use t4
-user:      tool_result t4   <- 模型还没见过，必须完整保留
-```
-
-更早的结果已经出现在至少一次模型请求中，才可以按规则缩短。该设计保证每个工具结果
-至少被模型完整读取一次。
-
-### 9.5 配对保护
-
-`_snip` 和 `reactive_compact` 在选择切点时都会检查边界：
+压缩只能移除完整调用组，不能留下孤儿结果：
 
 ```mermaid
 flowchart LR
     Before["...旧消息"] --> Use["assistant<br/>tool_use"]
     Use --> Result["user<br/>tool_result"]
     Result --> After["...新消息"]
-
-    CutBad["错误切点"] -.-> Result
-    CutGood["正确切点"] -.-> Use
+    Archive["归档切点"] -.-> Use
 ```
 
-如果尾部刚好从 `tool_result` 开始，切点会前移，把对应的 `tool_use` 一并保留。
+如果近期尾部从 `tool_result` 开始，checkpoint 会前移以保留对应的 `tool_use`；如果预算仍不够，
+就将二者一起归档。`read_file` 限制每页行数和字符数，并通过 `offset` 翻页；`search_file` 还限制
+匹配数、输出字符数与最多 10 MB 的源文件扫描量，避免回读本身再次撑满上下文。
 
-### 9.6 主动压缩与被动补救
+### 9.6 增量摘要与失败恢复
+
+第一次 checkpoint 把需要概括的历史作为 `new_history` 交给摘要模型。后续 checkpoint 发送
+“上一次有效摘要 + 新增历史”，而不是反复摘要全部会话。摘要按完整消息组加入请求；只有首个
+组本身超过摘要输入预算时才继续缩小其采样。后续组放不下时不计入本次已摘要数量，会保留为
+待处理历史。
+
+若摘要客户端不可用、返回空文本、返回过长文本，或 `finish_reason` 具有明确的异常结束原因，
+程序不把半截输出当新摘要：优先保留旧 `summary`，归档本次失败的新增历史，并将路径加入
+`pending_transcripts`。缺失 `finish_reason` 时按兼容路径接受，无法据此确认是否截断。
+只有再次触发摘要时才会读取待处理归档。若受保护的用户原文、
+系统提示或工具定义本身已超过本地预算，会抛出
+`ContextBudgetError`，而不是悄悄删除要求。
+
+### 9.7 主动压缩与被动补救
 
 - `prepare`：每次模型调用前执行，属于主动管理；
 - `reactive_compact`：API 明确报上下文超限后执行，属于一次性补救。
 
-后者会摘要旧历史，同时尽量保留最近五条消息。`Agent` 默认只允许补救一次，避免在
-错误识别或服务异常时无限重试。
+后者将当前目标缩到原请求的一半左右，重新走 checkpoint 流程，并尽量保留最近五条消息。
+`Agent` 默认只允许补救一次，避免在错误识别或服务异常时无限重试。补救成功后返回的消息继续
+进入同一轮 ReAct 循环；它不改变工具协议或用户请求 ledger。
 
 ---
 
@@ -889,14 +951,18 @@ flowchart TD
 | `test_tools.py` | 文件读写、路径逃逸、glob、bash、Todo 约束 |
 | `test_hooks.py` | 执行前拦截、停止续跑、输入替换、执行后观察 |
 | `test_permission.py` | 硬拒绝、人工同意/拒绝、拒绝后循环继续 |
-| `test_compact.py` | 四级压缩、落盘恢复、未读结果保留、配对不变量 |
+| `test_compact.py` | 归档、占位、检查点和工具调用组配对 |
+| `test_budget.py` | 完整请求预算、输出预留、安全余量与自定义估算器 |
+| `test_context_policy.py` | 超大最新结果落盘、请求 ledger、增量摘要、摘要输入采样与 reactive 缩减 |
+| `test_context_recovery.py` | 归档回读、摘要失败降级、待重放历史、取消与真实 Loop 接回 |
 | `test_models.py` | 提供商检测、OpenAI 转换、Fallback、环境配置 |
+| `test_web.py` / `test_desktop.py` | 本地会话、事件接口和桌面入口 |
 
 最值得先看的测试有三个：
 
 1. `test_tool_roundtrip`：理解 Agent 为什么要调用模型两次；
 2. `test_denial_reaches_model_not_crash`：理解拒绝也是一种结果；
-3. `test_snip_tail_boundary_protects_pair`：理解压缩不能破坏协议。
+3. `test_failed_incremental_summary_retains_old_summary_and_replays_delta`：理解失败不能覆盖旧摘要。
 
 常用命令：
 
@@ -966,8 +1032,8 @@ pytest -q tests/test_loop.py::test_tool_roundtrip
 
 1. 修改 `SUMMARY_SYSTEM`；
 2. 保持摘要内容仍是普通文本，不改核心消息协议；
-3. 用 MockClient 验证摘要被放入 compacted message；
-4. 保留完整 transcript 路径。
+3. 用 MockClient 验证新增历史进入摘要输入，且 `user_requests` 不受摘要文本影响；
+4. 保留完整 transcript 与 pending transcript 路径。
 
 学到的原则：摘要只能降低上下文成本，不能成为唯一事实副本。
 
@@ -975,7 +1041,7 @@ pytest -q tests/test_loop.py::test_tool_roundtrip
 
 ## 14. 边界、风险与生产化方向
 
-AgentLoop 是教学与实验 Harness，不应直接当作生产级远程执行器。
+AgentLoop 面向本地开发场景；下面列出其真实运行边界，以及面向更强隔离或多用户场景时的方向。
 
 | 当前边界 | 影响 | 生产化方向 |
 |---|---|---|
@@ -983,8 +1049,9 @@ AgentLoop 是教学与实验 Harness，不应直接当作生产级远程执行�
 | 权限规则是字符串匹配 | 可绕过、可误报 | 结构化策略与系统调用限制 |
 | 工具调用串行 | 多工具延迟较高 | 对只读、无依赖工具做受控并发 |
 | `.env` 解析简单 | 不支持复杂语法 | 进程环境或成熟配置库 |
-| token 用字符数估算 | 与真实 tokenizer 有偏差 | 按模型接入 tokenizer |
-| 摘要由当前模型生成 | 可能遗漏事实 | 结构化状态 + 摘要校验 |
+| 本地 UTF-8 请求估算 | 与真实 tokenizer 有偏差，提供商仍可能拒绝 | 按模型接入 tokenizer，并保留 reactive compact |
+| 摘要由当前模型生成 | 可能遗漏事实或被截断 | 原文归档、请求 ledger、摘要质量校验与失败重放 |
+| 归档可定向回读 | 不会自行判断何时该读哪份证据 | 增加受控的检索/排序策略和来源标注 |
 | 会话保存为本地 JSON | 适合单机单用户，不支持多进程并发写 | 数据库、文件锁或单写服务 |
 | SSE 重放缓冲仅在内存 | 服务进程重启后不能重放瞬时事件 | 外部事件日志或消息队列 |
 
@@ -1028,10 +1095,10 @@ flowchart TD
 
 1. `agentloop/compact.py::Compactor.prepare`
 2. `_spill_batch`
-3. `_snip`
-4. `_placeholder`
-5. `summarize` 与 `reactive_compact`
-6. `tests/test_compact.py`
+3. `_placeholder`
+4. `_compact` 与 `_ask_summary`
+5. `reactive_compact`
+6. `tests/test_context_policy.py` 与 `tests/test_context_recovery.py`
 
 目标：能手动画出消息切片前后，且不制造孤儿 `tool_result`。
 
@@ -1060,7 +1127,9 @@ flowchart TD
 | Permission gate | 工具执行前决定放行或拒绝的边界 |
 | Compaction | 在保留关键事实的前提下缩短消息历史 |
 | Spill | 把大工具输出写入磁盘，消息里只留预览和路径 |
+| Checkpoint | 一条 JSON 状态消息，连接用户请求 ledger、摘要、近期消息与归档路径 |
 | Transcript | 压缩前落盘保存的完整消息历史 |
+| Pending transcript | 摘要失败或本轮未能处理时，等待下次重放的历史路径 |
 | Adapter | 在内部统一格式和外部厂商协议之间转换 |
 | Retry | 同一客户端对暂时性失败再次请求 |
 | Fallback | 当前客户端最终失败后切换到另一个模型 |
@@ -1076,7 +1145,7 @@ flowchart TD
 - [ ] 能解释 `tool_use_id` 为什么不能丢。
 - [ ] 能说清 Hook 的短路规则。
 - [ ] 能区分文件路径保护和 shell 权限策略。
-- [ ] 能按顺序解释四级压缩及其成本。
+- [ ] 能说明完整请求预算、分级处理、检查点和回读怎样衔接。
 - [ ] 能区分 retry、fallback 和 reactive compact。
 - [ ] 能增加一个工具且不修改 `Agent.run`。
 - [ ] 能用 MockClient 为新行为写离线测试。
