@@ -35,9 +35,9 @@ def test_spill_writes_disk_and_keeps_path(workdir):
     messages = [{"role": "user", "content": "q"}, *_pair("t1", "x" * 40_000)]
     out = compactor.prepare(messages)
     content = out[-1]["content"][0]["content"]
-    assert "Full output: " in content and ".task_outputs/tool-results/t1.txt" in content
+    assert "Full output: .task_outputs/tool-results/" in content
     assert len(content) < 5_000  # 只剩预览 + 路径
-    spilled = workdir / ".task_outputs" / "tool-results" / "t1.txt"
+    spilled = workdir / content.split("Full output: ", 1)[1]
     assert spilled.read_text() == "x" * 40_000  # 完整内容可找回
 
 
@@ -120,8 +120,8 @@ def test_placeholder_replaces_old_but_not_new(workdir):
         for b in m["content"]
         if b.get("type") == "tool_result"
     ]
-    assert "[Earlier tool result omitted.]" in contents[0]
-    assert "[Earlier tool result omitted.]" in contents[1]
+    assert "[Earlier tool result saved at " in contents[0]
+    assert "[Earlier tool result saved at " in contents[1]
     assert contents[2] == "c" * 300
     assert contents[3] == "d" * 500
 
@@ -154,8 +154,8 @@ def test_summarize_replaces_history(workdir):
     content = out[0]["content"]
     assert "[Compacted]" in content
     assert "SUMMARY FACTS" in content
-    assert "original request" in content  # 当前请求与摘要明确分开
-    assert "Full transcript:" in content
+    assert "b" * 2_000 in content  # 保留最新用户请求，不再固定取首条
+    assert '"transcript":' in content
     assert list((workdir / ".transcripts").glob("transcript-*.json"))
 
 

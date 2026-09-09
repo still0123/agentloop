@@ -102,7 +102,7 @@ class Agent:
         while True:
             if self.should_stop():
                 return _cancelled_result(messages, turns, usage, emit)
-            messages = self.compactor.prepare(messages)
+            messages = self.compactor.prepare(messages, current_request=user_input)
             turn = turns + 1
             emit({"type": "model_start", "turn": turn})
             streamed = False
@@ -136,7 +136,9 @@ class Agent:
                 if reactive_retries < self.reactive_retries and _is_prompt_too_long(
                     exc
                 ):
-                    messages = self.compactor.reactive_compact(messages)
+                    messages = self.compactor.reactive_compact(
+                        messages, current_request=user_input
+                    )
                     reactive_retries += 1
                     continue
                 raise

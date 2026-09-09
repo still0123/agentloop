@@ -1,0 +1,78 @@
+{
+  "baseline": "16e0a07",
+  "measurement": "JSON character count, not tokens",
+  "summary_mode": "fixed response; no semantic quality evaluation",
+  "rows": [
+    {
+      "scenario": "old_tool_results",
+      "version": "before",
+      "status": "ok",
+      "before_chars": 142960,
+      "after_chars": 43150,
+      "reduction_percent": 69.82,
+      "summary_calls": 0,
+      "latest_request_verbatim": null,
+      "old_evidence_retained_or_archived": false,
+      "artifact_bytes": 0,
+      "local_elapsed_ms": 0.69
+    },
+    {
+      "scenario": "old_tool_results",
+      "version": "after",
+      "status": "ok",
+      "before_chars": 142960,
+      "after_chars": 44110,
+      "reduction_percent": 69.15,
+      "summary_calls": 0,
+      "latest_request_verbatim": null,
+      "old_evidence_retained_or_archived": true,
+      "artifact_bytes": 90110,
+      "local_elapsed_ms": 8.52
+    },
+    {
+      "scenario": "changed_request",
+      "version": "before",
+      "status": "ok",
+      "before_chars": 80144,
+      "after_chars": 228,
+      "reduction_percent": 99.72,
+      "summary_calls": 1,
+      "latest_request_verbatim": false,
+      "old_evidence_retained_or_archived": null,
+      "artifact_bytes": 80188,
+      "local_elapsed_ms": 2.3
+    },
+    {
+      "scenario": "changed_request",
+      "version": "after",
+      "status": "ok",
+      "before_chars": 80144,
+      "after_chars": 288,
+      "reduction_percent": 99.64,
+      "summary_calls": 1,
+      "latest_request_verbatim": true,
+      "old_evidence_retained_or_archived": null,
+      "artifact_bytes": 80188,
+      "local_elapsed_ms": 2.32
+    },
+    {
+      "scenario": "summary_failure",
+      "version": "before",
+      "status": "ModelError",
+      "before_chars": 80144
+    },
+    {
+      "scenario": "summary_failure",
+      "version": "after",
+      "status": "ok",
+      "before_chars": 80144,
+      "after_chars": 310,
+      "reduction_percent": 99.61,
+      "summary_calls": 1,
+      "latest_request_verbatim": true,
+      "old_evidence_retained_or_archived": null,
+      "artifact_bytes": 80188,
+      "local_elapsed_ms": 2.07
+    }
+  ]
+}
