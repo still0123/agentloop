@@ -72,7 +72,7 @@ def test_summary_failure_keeps_request_archive_and_tool_pair(workdir, client):
     messages = [{"role": "user", "content": "old goal"}]
     messages += [{"role": "assistant", "content": "old context" * 1000}]
     messages += pair("pending", "new observation")
-    c = Compactor(workdir, client=client, char_limit=1000)
+    c = Compactor(workdir, client=client, char_limit=2000)
     out = c.prepare(messages, current_request="Only inspect, do not edit")
     state = json.loads(out[0]["content"].split("\n", 1)[1])
     assert state["current_request"] == "Only inspect, do not edit"
@@ -181,7 +181,13 @@ def test_reactive_compaction_rejoins_loop_with_current_request(workdir):
 
     model = RejectOnce()
     agent.client = model
-    result = agent.run("current request", [{"role": "user", "content": "old"}])
+    result = agent.run(
+        "current request",
+        [
+            {"role": "user", "content": "old"},
+            {"role": "assistant", "content": "history " * 2000},
+        ],
+    )
     assert result.text == "resumed"
     assert model.calls == 2
     state = json.loads(model.accepted[0]["content"].split("\n", 1)[1])

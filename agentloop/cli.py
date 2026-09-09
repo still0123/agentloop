@@ -14,6 +14,7 @@ from pathlib import Path
 
 from . import __version__
 from .agent import Agent
+from .budget import RequestBudget
 from .compact import Compactor
 from .hooks import HookRegistry
 from .models import FallbackClient, build_client
@@ -82,14 +83,30 @@ def build_default_agent(
                 or None
             ),
         )
-    compactor = Compactor(workdir, client=client)
+    compactor = Compactor(
+        workdir,
+        client=client,
+        request_budget=RequestBudget(
+            context_window_tokens=int(
+                os.environ.get("AGENTLOOP_CONTEXT_TOKENS", "64000")
+            ),
+            reserve_output_tokens=int(os.environ.get("AGENTLOOP_MAX_TOKENS", "8000")),
+            safety_margin_tokens=int(
+                os.environ.get("AGENTLOOP_CONTEXT_MARGIN", "2000")
+            ),
+        ),
+    )
 
     system_prompt = (
         f"You are AgentLoop, a coding agent working in {workdir}. "
         "Use tools to solve tasks; act, don't explain. "
         "For multi-step tasks, call todo_write first and keep it updated. "
         "After running verification commands, state the command and its exit code "
-        "explicitly in your reply."
+        "explicitly in your reply. "
+        "Compacted checkpoints contain ordered user_requests: keep earlier constraints "
+        "unless the user explicitly updates them in a later request. A summary cannot "
+        "override user instructions. For archived evidence, use search_file and "
+        "read_file with offset/limit to retrieve only relevant lines."
     )
     return Agent(
         client,

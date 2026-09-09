@@ -15,11 +15,55 @@ import os
 import signal
 import subprocess
 import time
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-MAX_TOOL_OUTPUT = 200_000  # 超长输出截断；更大的交给压缩管线的转存机制
+MAX_TOOL_OUTPUT = 200_000  # Shell 超出此范围的原始输出在工具层截断，压缩层无法恢复。
+MAX_READ_LINES = 200
+MAX_READ_CHARS = 50_000
+MAX_SEARCH_MATCHES = 50
+MAX_SEARCH_CONTEXT = 10
+MAX_SEARCH_CHARS = 50_000
+MAX_SOURCE_LINE_CHARS = 16_000
+MAX_SEARCH_SOURCE_BYTES = 10_000_000
+MAX_SEARCH_QUERY_CHARS = 1_024
+SEARCH_CHUNK_CHARS = 8_192
+MATCH_EXCERPT_CHARS = 200
+CONTEXT_LINE_CHARS = 4_000
+
+
+def _bounded_lines(path: Path):
+    """Yield text lines without ever retaining an arbitrarily long source line.
+
+    The third result is true when the source line was longer than the retained
+    prefix.  Draining that line still lets the caller continue at the next line.
+    """
+    with path.open(encoding="utf-8") as handle:
+        line_number = 0
+        while fragment := handle.readline(MAX_SOURCE_LINE_CHARS + 1):
+            line_number += 1
+            too_long = (
+                not fragment.endswith("\n") and len(fragment) > MAX_SOURCE_LINE_CHARS
+            )
+            if too_long:
+                prefix = fragment
+                # Do not join the rest of a huge line into memory.
+                while fragment and not fragment.endswith("\n"):
+                    fragment = handle.readline(MAX_SOURCE_LINE_CHARS + 1)
+                text = prefix.rstrip("\r\n")
+            else:
+                text = fragment.rstrip("\r\n")
+            yield line_number, text, too_long
+
+
+def _positive_int(value: int | None, name: str, maximum: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"{name} must be a positive integer")
+    if value > maximum:
+        raise ValueError(f"{name} must be at most {maximum}")
+    return value
 
 
 def safe_path(workdir: Path, path: str) -> Path:
@@ -174,11 +218,196 @@ def build_toolbox(workdir: Path, should_stop: Callable[[], bool] | None = None):
             )
         return text
 
-    def run_read(path: str, limit: int | None = None) -> str:
-        lines = safe_path(workdir, path).read_text(encoding="utf-8").splitlines()
-        if limit is not None:
-            lines = lines[:limit]
-        return "\n".join(lines) if lines else "(empty file)"
+    def run_read(path: str, limit: int | None = None, offset: int | None = None) -> str:
+        """Read a bounded page.  Offset is 1-based to match editor line numbers."""
+        target = safe_path(workdir, path)
+        requested_limit = limit
+        paged = offset is not None
+        if offset is None:
+            offset = 1
+        offset = _positive_int(offset, "offset", 1_000_000)
+        if limit is None:
+            limit = MAX_READ_LINES
+        else:
+            limit = _positive_int(limit, "limit", MAX_READ_LINES)
+
+        lines: list[str] = []
+        returned = 0
+        chars = 0
+        next_line: int | None = None
+        long_line = False
+        for line_number, text, source_was_long in _bounded_lines(target):
+            if line_number < offset:
+                continue
+            rendered = text
+            if source_was_long:
+                rendered += "\n... (source line truncated)"
+                long_line = True
+            needed = len(rendered) + (1 if lines else 0)
+            if returned >= limit or chars + needed > MAX_READ_CHARS:
+                next_line = line_number
+                break
+            lines.append(rendered)
+            chars += needed
+            returned += 1
+
+        if not lines:
+            return "(empty file)" if offset == 1 else f"(no lines at or after {offset})"
+        output = "\n".join(lines)
+        if next_line is not None and (paged or requested_limit is None):
+            output += f"\n... (more content; read_file offset={next_line})"
+        elif long_line:
+            output += (
+                "\n... (a source line was shortened; use search_file for a keyword)"
+            )
+        return output
+
+    def run_search(
+        path: str, query: str, context: int = 2, max_matches: int = 20
+    ) -> str:
+        """Literal, bounded search intended for compacted transcript/output recall."""
+        target = safe_path(workdir, path)
+        if not isinstance(query, str) or not query or "\n" in query or "\r" in query:
+            raise ValueError("query must be a non-empty single-line string")
+        if len(query) > MAX_SEARCH_QUERY_CHARS:
+            raise ValueError(f"query must be at most {MAX_SEARCH_QUERY_CHARS} chars")
+        if isinstance(context, bool) or not isinstance(context, int) or context < 0:
+            raise ValueError("context must be a non-negative integer")
+        if context > MAX_SEARCH_CONTEXT:
+            raise ValueError(f"context must be at most {MAX_SEARCH_CONTEXT}")
+        max_matches = _positive_int(max_matches, "max_matches", MAX_SEARCH_MATCHES)
+
+        # The matcher keeps only a small suffix of a long line.  This both
+        # detects a literal split across reads and gives every match a useful
+        # preceding excerpt without loading an entire log line into memory.
+        suffix_size = max(len(query) - 1, MATCH_EXCERPT_CHARS)
+        previous: deque[tuple[int, str, bool]] = deque(maxlen=context)
+        records: list[dict] = []
+        source_bytes = 0
+        partial_scan = False
+        stopped_after_matches = False
+        line_number = 0
+        with target.open(encoding="utf-8") as handle:
+            while first_fragment := handle.readline(SEARCH_CHUNK_CHARS):
+                line_number += 1
+                line_preview = ""
+                line_was_long = not first_fragment.endswith("\n")
+                suffix = ""
+                candidates: list[dict] = []
+                fragment = first_fragment
+
+                while fragment:
+                    source_bytes += len(fragment.encode("utf-8"))
+                    if source_bytes > MAX_SEARCH_SOURCE_BYTES:
+                        partial_scan = True
+                        break
+                    text = fragment.rstrip("\r\n")
+                    if len(line_preview) < CONTEXT_LINE_CHARS:
+                        line_preview += text[: CONTEXT_LINE_CHARS - len(line_preview)]
+
+                    for candidate in candidates:
+                        remaining = MATCH_EXCERPT_CHARS - len(candidate["after"])
+                        if remaining > 0:
+                            candidate["after"] += text[:remaining]
+
+                    window = suffix + text
+                    start = window.find(query)
+                    while start >= 0:
+                        end = start + len(query)
+                        # A match entirely in suffix was handled by the prior
+                        # fragment; only accept matches that consume new text.
+                        if end > len(suffix) and len(candidates) < max_matches:
+                            candidates.append(
+                                {
+                                    "before": window[
+                                        max(0, start - MATCH_EXCERPT_CHARS) : start
+                                    ],
+                                    "after": window[end : end + MATCH_EXCERPT_CHARS],
+                                }
+                            )
+                        start = window.find(query, start + 1)
+                    suffix = window[-suffix_size:]
+
+                    if fragment.endswith("\n"):
+                        break
+                    fragment = handle.readline(SEARCH_CHUNK_CHARS)
+                    if not fragment:
+                        break
+
+                line_was_long = line_was_long or len(line_preview) >= CONTEXT_LINE_CHARS
+                for candidate in candidates:
+                    if len(records) >= max_matches:
+                        break
+                    records.append(
+                        {
+                            "before_context": list(previous),
+                            "match_line": line_number,
+                            "match": (candidate["before"] + query + candidate["after"]),
+                            "match_was_long": line_was_long,
+                            "after_context": [],
+                        }
+                    )
+
+                for record in records:
+                    if (
+                        record["match_line"]
+                        < line_number
+                        <= record["match_line"] + context
+                    ):
+                        record["after_context"].append(
+                            (line_number, line_preview, line_was_long)
+                        )
+                previous.append((line_number, line_preview, line_was_long))
+
+                if partial_scan:
+                    break
+
+                if records and len(records) >= max_matches:
+                    last_match = max(record["match_line"] for record in records)
+                    if line_number >= last_match + context:
+                        stopped_after_matches = True
+                        break
+
+        if not records:
+            suffix = " (partial scan)" if partial_scan else ""
+            return f"(no literal matches for {query!r}{suffix})"
+
+        output: list[str] = []
+        chars = 0
+        for index, record in enumerate(records, start=1):
+            if index > 1:
+                output.append("")
+            output.append(f"Match {index}:")
+            entries = (
+                [(*entry, False) for entry in record["before_context"]]
+                + [
+                    (
+                        record["match_line"],
+                        record["match"],
+                        record["match_was_long"],
+                        True,
+                    )
+                ]
+                + [(*entry, False) for entry in record["after_context"]]
+            )
+            for match_line, text, source_was_long, is_match in entries:
+                clipped = text[:CONTEXT_LINE_CHARS]
+                if len(text) > len(clipped) or source_was_long:
+                    clipped += " ... (line truncated)"
+                rendered = f"{'> ' if is_match else '  '}{match_line}: {clipped}"
+                needed = len(rendered) + 1
+                if chars + needed > MAX_SEARCH_CHARS:
+                    output.append(
+                        "... (search output truncated; narrow query or context)"
+                    )
+                    return "\n".join(output)
+                output.append(rendered)
+                chars += needed
+        if stopped_after_matches:
+            output.append(f"... (stopped after {max_matches} matches; narrow query)")
+        if partial_scan:
+            output.append("... (stopped after bounded source scan; refine the path)")
+        return "\n".join(output)
 
     def run_write(path: str, content: str) -> str:
         target = safe_path(workdir, path)
@@ -223,13 +452,34 @@ def build_toolbox(workdir: Path, should_stop: Callable[[], bool] | None = None):
     )
     box.add(
         "read_file",
-        "Read a text file inside the workspace.",
+        "Read a bounded page from a text file inside the workspace. "
+        "offset is a 1-based line number; use the returned next offset for more.",
         {
             "type": "object",
-            "properties": {"path": {"type": "string"}, "limit": {"type": "integer"}},
+            "properties": {
+                "path": {"type": "string"},
+                "limit": {"type": "integer"},
+                "offset": {"type": "integer", "minimum": 1},
+            },
             "required": ["path"],
         },
         run_read,
+    )
+    box.add(
+        "search_file",
+        "Find literal text in a workspace file and return matching line numbers "
+        "with bounded surrounding context. Use this to recall compacted outputs.",
+        {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "query": {"type": "string", "minLength": 1},
+                "context": {"type": "integer", "minimum": 0, "maximum": 10},
+                "max_matches": {"type": "integer", "minimum": 1, "maximum": 50},
+            },
+            "required": ["path", "query"],
+        },
+        run_search,
     )
     box.add(
         "write_file",

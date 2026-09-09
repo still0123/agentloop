@@ -130,7 +130,8 @@ def test_placeholder_keeps_spill_path(workdir):
     compactor = Compactor(
         workdir, client=None, keep_recent_results=0, placeholder_limit=100
     )
-    marked = "head\n\nFull output: .task_outputs/tool-results/t0.txt\n" + "x" * 200
+    saved = compactor._save_output("x" * 200)
+    marked = "head" + "x" * 200 + f"\n\nFull output: {saved}"
     messages = [
         {"role": "user", "content": "q"},
         *_pair("t0", marked),
@@ -138,23 +139,23 @@ def test_placeholder_keeps_spill_path(workdir):
     ]
     out = compactor.prepare(messages)
     old = out[2]["content"][0]["content"]
-    assert old == "[Earlier tool result saved at .task_outputs/tool-results/t0.txt]"
+    assert old == f"[Earlier tool result saved at {saved}]"
 
 
 def test_summarize_replaces_history(workdir):
     summarizer = MockClient(["SUMMARY FACTS"])
-    compactor = Compactor(workdir, client=summarizer, char_limit=1_000)
+    compactor = Compactor(workdir, client=summarizer, char_limit=1_500)
     messages = [
         {"role": "user", "content": "original request"},
         {"role": "assistant", "content": "a" * 2_000},
-        {"role": "user", "content": "b" * 2_000},
+        {"role": "user", "content": "b" * 200},
     ]
     out = compactor.prepare(messages)
     assert len(out) == 1
     content = out[0]["content"]
     assert "[Compacted]" in content
     assert "SUMMARY FACTS" in content
-    assert "b" * 2_000 in content  # 保留最新用户请求，不再固定取首条
+    assert "b" * 200 in content  # 保留最新用户请求，不再固定取首条
     assert '"transcript":' in content
     assert list((workdir / ".transcripts").glob("transcript-*.json"))
 
@@ -174,7 +175,10 @@ def test_summarize_skipped_under_limit(workdir):
 def test_reactive_compact_keeps_recent(workdir):
     compactor = Compactor(workdir, client=MockClient(["REACTIVE"]))
     messages = [{"role": "user", "content": "q"}] + [
-        {"role": "assistant" if i % 2 else "user", "content": f"m{i}"}
+        {
+            "role": "assistant" if i % 2 else "user",
+            "content": f"m{i}" + ("x" * 2000 if i % 2 else ""),
+        }
         for i in range(12)
     ]
     out = compactor.reactive_compact(messages)
@@ -188,7 +192,7 @@ def test_reactive_compact_pairing_guard(workdir):
     compactor = Compactor(workdir, client=MockClient(["R"]))
     messages = (
         [{"role": "user", "content": "q"}]
-        + [{"role": "user", "content": f"f{i}"} for i in range(4)]
+        + [{"role": "assistant", "content": "x" * 4000} for i in range(4)]
         + list(_pair("tX", "rx"))
         + [{"role": "user", "content": f"b{i}"} for i in range(3)]
         + [{"role": "user", "content": "tail"}]

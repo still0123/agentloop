@@ -1,6 +1,7 @@
 import threading
 import time
 
+import agentloop.tools as tools_module
 from agentloop.tools import TodoManager, build_toolbox, safe_path
 
 
@@ -27,6 +28,140 @@ def test_read_limit(workdir):
         "line1",
         "line2",
     ]
+
+
+def test_read_offset_is_one_based_and_returns_next_page_hint(workdir):
+    box, _ = build_toolbox(workdir)
+    _run(
+        box,
+        "write_file",
+        path="n.txt",
+        content="\n".join(f"line{i}" for i in range(5)),
+    )
+
+    out = _run(box, "read_file", path="n.txt", offset=3, limit=2)
+
+    assert out.splitlines() == [
+        "line2",
+        "line3",
+        "... (more content; read_file offset=5)",
+    ]
+
+
+def test_read_rejects_invalid_pagination_values(workdir):
+    box, _ = build_toolbox(workdir)
+    _run(box, "write_file", path="n.txt", content="line")
+    assert _run(box, "read_file", path="n.txt", offset=0).startswith("Error:")
+    assert _run(box, "read_file", path="n.txt", limit=0).startswith("Error:")
+
+
+def test_search_file_returns_literal_matches_with_line_numbers_and_context(workdir):
+    box, _ = build_toolbox(workdir)
+    _run(
+        box,
+        "write_file",
+        path="logs/agent.log",
+        content=(
+            "start\nconnection failed [code=42]\nretrying\n"
+            "connection failed [code=42]\ndone"
+        ),
+    )
+
+    out = _run(
+        box,
+        "search_file",
+        path="logs/agent.log",
+        query="[code=42]",
+        context=1,
+    )
+
+    assert "Match 1:" in out
+    assert "> 2: connection failed [code=42]" in out
+    assert "> 4: connection failed [code=42]" in out
+    assert "  1: start" in out
+    assert "  5: done" in out
+
+
+def test_search_file_finds_needle_at_the_end_of_a_long_line(workdir):
+    box, _ = build_toolbox(workdir)
+    _run(box, "write_file", path="long.txt", content=("x" * 20_000) + "needle")
+
+    out = _run(box, "search_file", path="long.txt", query="needle")
+
+    assert "> 1:" in out
+    assert "needle" in out
+    assert len(out) < 1_000
+
+
+def test_search_file_finds_a_literal_split_across_read_chunks(workdir):
+    box, _ = build_toolbox(workdir)
+    _run(
+        box,
+        "write_file",
+        path="split.txt",
+        content=("x" * (tools_module.SEARCH_CHUNK_CHARS - 2)) + "needle",
+    )
+
+    out = _run(box, "search_file", path="split.txt", query="needle")
+
+    assert "> 1:" in out
+    assert "needle" in out
+
+
+def test_search_file_bounds_actual_source_scan(workdir, monkeypatch):
+    box, _ = build_toolbox(workdir)
+    _run(box, "write_file", path="large.txt", content=("x" * 200) + "\nneedle")
+    monkeypatch.setattr(tools_module, "MAX_SEARCH_SOURCE_BYTES", 100)
+
+    out = _run(box, "search_file", path="large.txt", query="needle")
+
+    assert "no literal matches" in out
+    assert "partial scan" in out
+
+
+def test_search_file_stops_after_max_matches_and_needed_context(workdir, monkeypatch):
+    box, _ = build_toolbox(workdir)
+    _run(
+        box,
+        "write_file",
+        path="many.txt",
+        content="needle\nneedle\n" + ("x" * 1_000),
+    )
+    monkeypatch.setattr(tools_module, "MAX_SEARCH_SOURCE_BYTES", 100)
+
+    out = _run(
+        box, "search_file", path="many.txt", query="needle", max_matches=2, context=0
+    )
+
+    assert out.count("Match ") == 2
+    assert "stopped after 2 matches" in out
+    assert "partial scan" not in out
+
+
+def test_search_file_protects_workspace_paths(workdir):
+    box, _ = build_toolbox(workdir)
+    assert _run(box, "search_file", path="../outside", query="x").startswith("Error:")
+
+
+def test_search_keeps_found_matches_when_source_limit_interrupts_long_line(
+    workdir, monkeypatch
+):
+    import agentloop.tools as tools_module
+
+    monkeypatch.setattr(tools_module, "MAX_SEARCH_SOURCE_BYTES", 9000)
+    (workdir / "long.txt").write_text("needle" + "x" * 20000)
+    box, _ = build_toolbox(workdir)
+    out = _run(box, "search_file", path="long.txt", query="needle")
+    assert "needle" in out
+    assert "Match 1:" in out
+    assert "bounded source scan" in out
+
+
+def test_search_rejects_unbounded_literal(workdir):
+    box, _ = build_toolbox(workdir)
+    out = _run(box, "search_file", path="any.txt", query="x" * 100000)
+    assert out.startswith("Error:")
+    assert "query must be at most" in out
 
 
 def test_edit_replaces_first_occurrence(workdir):

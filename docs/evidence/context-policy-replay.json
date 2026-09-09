@@ -1,0 +1,66 @@
+{
+  "baseline_revision": "5154aa2",
+  "measurement": "serialized message character count, not tokens",
+  "execution": "offline fixed Mock-style responses; no network or model-quality claim",
+  "scenarios": {
+    "latest_120k_tool_result": {
+      "baseline": {
+        "output_chars": 120000,
+        "before_chars": 120265,
+        "after_chars": 120458,
+        "within_char_limit": false,
+        "summary_calls": 1,
+        "tail_error_visible": true,
+        "output_archived": false,
+        "original_output_round_trip": null
+      },
+      "current": {
+        "output_chars": 120000,
+        "before_chars": 120265,
+        "after_chars": 1577,
+        "within_char_limit": true,
+        "summary_calls": 0,
+        "tail_error_visible": true,
+        "output_archived": true,
+        "original_output_round_trip": true
+      }
+    },
+    "summary_sampling": {
+      "baseline": {
+        "summary_calls": 1,
+        "middle_error_in_summary_input": false,
+        "tail_marker_in_summary_input": false
+      },
+      "current": {
+        "summary_calls": 1,
+        "middle_error_in_summary_input": true,
+        "tail_marker_in_summary_input": true
+      }
+    },
+    "read_only_then_continue": {
+      "baseline": {
+        "summary_contains_read_only": false,
+        "context_contains_read_only": false,
+        "has_user_requests_field": false,
+        "ledger_contains_read_only": false
+      },
+      "current": {
+        "summary_contains_read_only": false,
+        "context_contains_read_only": true,
+        "has_user_requests_field": true,
+        "ledger_contains_read_only": true
+      }
+    },
+    "failed_incremental_summary": {
+      "current": {
+        "summary_preserved_after_failure": true,
+        "pending_count_after_failure": 1,
+        "pending_cleared_after_replay": true,
+        "failed_delta_replayed_into_next_summary_input": true
+      },
+      "baseline": {
+        "pending_replay_state": "not implemented"
+      }
+    }
+  }
+}

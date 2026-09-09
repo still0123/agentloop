@@ -34,6 +34,9 @@ class ModelResponse:
     blocks: list = field(default_factory=list)
     # {"input_tokens": int, "output_tokens": int}
     usage: dict = field(default_factory=dict)
+    # Provider 原始结束原因，例如 OpenAI 的 "length" 或 Anthropic 的
+    # "max_tokens"。None 表示提供商没有给出该字段。
+    finish_reason: str | None = None
 
 
 class ModelError(RuntimeError):
@@ -341,14 +344,17 @@ class OpenAICompatClient:
         text_parts: list[str] = []
         tool_calls: dict[int, dict] = {}
         usage: dict = {}
+        finish_reason: str | None = None
 
         def on_data(data: dict) -> None:
-            nonlocal usage
+            nonlocal finish_reason, usage
             if data.get("error"):
                 raise ModelError(f"model stream error: {data['error']}")
             if isinstance(data.get("usage"), dict):
                 usage = data["usage"]
             for choice in data.get("choices") or []:
+                if choice.get("finish_reason") is not None:
+                    finish_reason = choice["finish_reason"]
                 delta = choice.get("delta") or {}
                 text = delta.get("content")
                 if isinstance(text, str) and text:
@@ -398,7 +404,8 @@ class OpenAICompatClient:
                         "message": {
                             "content": text or None,
                             "tool_calls": wire_calls,
-                        }
+                        },
+                        "finish_reason": finish_reason,
                     }
                 ],
                 "usage": usage,
@@ -435,6 +442,7 @@ class OpenAICompatClient:
                 "input_tokens": usage.get("prompt_tokens", 0),
                 "output_tokens": usage.get("completion_tokens", 0),
             },
+            finish_reason=data["choices"][0].get("finish_reason"),
         )
 
 
@@ -540,8 +548,10 @@ class AnthropicClient:
         blocks: dict[int, dict] = {}
         tool_json: dict[int, str] = {}
         usage = {"input_tokens": 0, "output_tokens": 0}
+        finish_reason: str | None = None
 
         def on_data(data: dict) -> None:
+            nonlocal finish_reason
             event_type = data.get("type")
             if event_type == "error":
                 raise ModelError(f"model stream error: {data.get('error')}")
@@ -555,6 +565,9 @@ class AnthropicClient:
                 usage["output_tokens"] = delta_usage.get(
                     "output_tokens", usage["output_tokens"]
                 )
+                delta = data.get("delta") or {}
+                if delta.get("stop_reason") is not None:
+                    finish_reason = delta["stop_reason"]
                 return
             index = int(data.get("index", 0))
             if event_type == "content_block_start":
@@ -614,7 +627,12 @@ class AnthropicClient:
         text = "".join(
             block.get("text", "") for block in ordered if block["type"] == "text"
         )
-        return ModelResponse(text=text, blocks=ordered, usage=usage)
+        return ModelResponse(
+            text=text,
+            blocks=ordered,
+            usage=usage,
+            finish_reason=finish_reason,
+        )
 
     @staticmethod
     def _parse(data: dict) -> ModelResponse:
@@ -628,6 +646,7 @@ class AnthropicClient:
                 "input_tokens": usage.get("input_tokens", 0),
                 "output_tokens": usage.get("output_tokens", 0),
             },
+            finish_reason=data.get("stop_reason"),
         )
 
 

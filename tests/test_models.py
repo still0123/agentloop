@@ -302,6 +302,7 @@ def test_openai_stream_rebuilds_text_tools_and_usage():
             "choices": [],
             "usage": {"prompt_tokens": 3, "completion_tokens": 2},
         },
+        {"choices": [{"delta": {}, "finish_reason": "length"}]},
         "[DONE]",
     ]
     server, thread = _serve_sse(chunks)
@@ -321,6 +322,7 @@ def test_openai_stream_rebuilds_text_tools_and_usage():
             "input": {"command": "echo hi"},
         }
         assert response.usage == {"input_tokens": 3, "output_tokens": 2}
+        assert response.finish_reason == "length"
         assert server.payload["stream"] is True
     finally:
         server.shutdown()
@@ -383,6 +385,11 @@ def test_anthropic_stream_rebuilds_text_tools_and_usage():
             },
         },
         {"type": "message_delta", "usage": {"output_tokens": 5}},
+        {
+            "type": "message_delta",
+            "delta": {"stop_reason": "max_tokens"},
+            "usage": {"output_tokens": 5},
+        },
     ]
     server, thread = _serve_sse(chunks)
     deltas = []
@@ -404,11 +411,70 @@ def test_anthropic_stream_rebuilds_text_tools_and_usage():
             "input": {"path": "README.md"},
         }
         assert response.usage == {"input_tokens": 4, "output_tokens": 5}
+        assert response.finish_reason == "max_tokens"
         assert server.payload["stream"] is True
     finally:
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+def test_provider_completion_parsers_preserve_raw_finish_reasons():
+    openai = OpenAICompatClient._parse(
+        {
+            "choices": [
+                {
+                    "message": {"content": "partial", "tool_calls": []},
+                    "finish_reason": "length",
+                }
+            ],
+            "usage": {"prompt_tokens": 7, "completion_tokens": 3},
+        }
+    )
+    anthropic = AnthropicClient._parse(
+        {
+            "content": [{"type": "text", "text": "partial"}],
+            "stop_reason": "max_tokens",
+            "usage": {"input_tokens": 7, "output_tokens": 3},
+        }
+    )
+
+    assert openai.finish_reason == "length"
+    assert anthropic.finish_reason == "max_tokens"
+
+
+def test_provider_stream_parsers_preserve_raw_finish_reasons(monkeypatch):
+    def replay_openai(*args):
+        on_data = args[-1]
+        on_data({"choices": [{"delta": {"content": "partial"}}]})
+        on_data({"choices": [{"delta": {}, "finish_reason": "length"}]})
+
+    monkeypatch.setattr("agentloop.models._stream_sse", replay_openai)
+    openai = OpenAICompatClient("test", "http://example.invalid", "key")._stream(
+        {}, {}, lambda _: None
+    )
+
+    def replay_anthropic(*args):
+        on_data = args[-1]
+        on_data(
+            {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "text", "text": "partial"},
+            }
+        )
+        on_data(
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": "max_tokens"},
+            }
+        )
+
+    monkeypatch.setattr("agentloop.models._stream_sse", replay_anthropic)
+    anthropic = AnthropicClient("test", "key")._stream({}, {}, lambda _: None)
+
+    assert openai.finish_reason == "length"
+    assert anthropic.finish_reason == "max_tokens"
 
 
 @pytest.mark.parametrize(

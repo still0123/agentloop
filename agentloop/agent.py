@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import inspect
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -85,13 +86,21 @@ class Agent:
         emit: EventCallback,
         stream_text: bool,
     ) -> RunResult:
+        original_request = user_input
         # UserPromptSubmit hook 可返回 str 替换输入（上下文注入的口子）
         replaced = self.hooks.trigger("UserPromptSubmit", user_input)
         if isinstance(replaced, str) and replaced:
             user_input = replaced
 
         messages = list(messages) if messages else []
-        messages.append({"role": "user", "content": user_input})
+        messages.append(
+            {
+                "role": "user",
+                "content": user_input,
+                "_request_id": uuid.uuid4().hex,
+                "_request_text": original_request,
+            }
+        )
         emit({"type": "run_start", "prompt": user_input})
 
         usage = {"input_tokens": 0, "output_tokens": 0}
@@ -102,7 +111,12 @@ class Agent:
         while True:
             if self.should_stop():
                 return _cancelled_result(messages, turns, usage, emit)
-            messages = self.compactor.prepare(messages, current_request=user_input)
+            messages = self.compactor.prepare(
+                messages,
+                current_request=original_request,
+                system_prompt=self.system_prompt,
+                tools=self.toolbox.defs,
+            )
             turn = turns + 1
             emit({"type": "model_start", "turn": turn})
             streamed = False
@@ -118,17 +132,25 @@ class Agent:
                     }
                 )
 
+            model_messages = [
+                {
+                    key: value
+                    for key, value in message.items()
+                    if key not in {"_request_id", "_request_text", "_origin"}
+                }
+                for message in messages
+            ]
             try:
                 if stream_text and _supports_text_stream(self.client.complete):
                     response = self.client.complete(
                         self.system_prompt,
-                        messages,
+                        model_messages,
                         self.toolbox.defs,
                         on_text=on_text,
                     )
                 else:
                     response = self.client.complete(
-                        self.system_prompt, messages, self.toolbox.defs
+                        self.system_prompt, model_messages, self.toolbox.defs
                     )
             except Exception as exc:  # 估算失误导致超限 → 补救一次
                 if self.should_stop():
@@ -137,7 +159,10 @@ class Agent:
                     exc
                 ):
                     messages = self.compactor.reactive_compact(
-                        messages, current_request=user_input
+                        messages,
+                        current_request=original_request,
+                        system_prompt=self.system_prompt,
+                        tools=self.toolbox.defs,
                     )
                     reactive_retries += 1
                     continue
@@ -164,7 +189,9 @@ class Agent:
                 # 模型想停 → Stop hook 有最后一次否决权（返回 str 强制续跑）
                 force = self.hooks.trigger("Stop", messages)
                 if isinstance(force, str) and force:
-                    messages.append({"role": "user", "content": force})
+                    messages.append(
+                        {"role": "user", "content": force, "_origin": "internal"}
+                    )
                     continue
                 result = RunResult(
                     text=response.text or "(no text)",
