@@ -253,6 +253,8 @@ class OpenAICompatClient:
         timeout: float = 120.0,
         retries: int = 3,
         should_stop: Callable[[], bool] | None = None,
+        disable_thinking: bool = False,
+        tool_choice: str = "auto",
     ) -> None:
         self.model = model
         self.base_url = base_url.rstrip("/")
@@ -261,6 +263,10 @@ class OpenAICompatClient:
         self.timeout = timeout
         self.retries = retries
         self.should_stop = should_stop
+        self.disable_thinking = disable_thinking
+        if tool_choice not in ("auto", "none", "required"):
+            raise ValueError("invalid tool_choice")
+        self.tool_choice = tool_choice
 
     def complete(
         self,
@@ -276,6 +282,8 @@ class OpenAICompatClient:
             "messages": _openai_wire_messages(system, messages),
             "max_tokens": self.max_tokens,
         }
+        if self.disable_thinking:
+            payload["thinking"] = {"type": "disabled"}
         if tools:
             payload["tools"] = [
                 {
@@ -288,7 +296,7 @@ class OpenAICompatClient:
                 }
                 for t in tools
             ]
-            payload["tool_choice"] = "auto"
+            payload["tool_choice"] = self.tool_choice
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",

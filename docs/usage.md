@@ -155,3 +155,9 @@ make check
 
 测试使用离线模型响应，不需要配置 API Key。CI 在 Python 3.10–3.13 上执行 Ruff 与 Pytest；
 格式和静态规则定义在 `pyproject.toml`。
+
+## 应用侧模型控制
+
+通过 Python 接入 `OpenAICompatClient` 时，可设置 `disable_thinking=True`，向支持该参数的提供商发送 `thinking: {type: disabled}`。默认不发送该字段。当前内部消息协议未实现 DeepSeek 思考内容的完整回传，DeepSeek 工具多轮应用应显式关闭思考模式，或先扩展协议后再启用。接口要求见 [DeepSeek 思考模式文档](https://api-docs.deepseek.com/guides/thinking_mode/)。
+
+需要以工具提交结构化结果的应用可设 `tool_choice="required"`；默认仍为 `auto`。该选项只在请求包含工具定义时发送，摘要等无工具请求不受影响。是否支持这些选项应以提供商接口为准。

@@ -484,3 +484,60 @@ def test_provider_stream_parsers_preserve_raw_finish_reasons(monkeypatch):
 def test_prompt_too_long_detection(message):
     assert _is_prompt_too_long(RuntimeError(message))
     assert not _is_prompt_too_long(RuntimeError("ordinary failure"))
+
+
+def test_disable_thinking_is_explicit_in_stream_and_plain_payloads(monkeypatch):
+    import agentloop.models as models
+
+    payloads = []
+
+    def post(url, payload, headers, timeout, should_stop):
+        payloads.append(payload)
+        return type(
+            "Reply",
+            (),
+            {
+                "status_code": 200,
+                "json": lambda self: {"choices": [{"message": {"content": "ok"}}]},
+            },
+        )()
+
+    def stream(url, payload, headers, timeout, should_stop, on_data):
+        payloads.append(payload)
+        on_data({"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]})
+
+    monkeypatch.setattr(models, "_post_json", post)
+    monkeypatch.setattr(models, "_stream_sse", stream)
+    client = models.OpenAICompatClient(
+        "model", "https://example.invalid", "dummy", disable_thinking=True
+    )
+    client.complete("system", [], [])
+    client.complete("system", [], [], on_text=lambda _: None)
+    assert all(p["thinking"] == {"type": "disabled"} for p in payloads)
+    client.disable_thinking = False
+    client.complete("system", [], [])
+    assert "thinking" not in payloads[-1]
+
+
+def test_required_tool_choice_only_applies_when_tools_are_present(monkeypatch):
+    import agentloop.models as models
+
+    captured = []
+
+    def stream(url, payload, headers, timeout, should_stop, on_data):
+        captured.append(payload)
+        on_data({"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]})
+
+    monkeypatch.setattr(models, "_stream_sse", stream)
+    client = models.OpenAICompatClient(
+        "test", "https://example.invalid", "dummy", tool_choice="required"
+    )
+    client.complete(
+        "system",
+        [],
+        [{"name": "submit_result", "input_schema": {"type": "object"}}],
+        on_text=lambda _: None,
+    )
+    assert captured[-1]["tool_choice"] == "required"
+    client.complete("system", [], [], on_text=lambda _: None)
+    assert "tool_choice" not in captured[-1]
