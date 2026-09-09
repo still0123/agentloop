@@ -1,4 +1,4 @@
-"""AgentLoop — 面向本地任务的可扩展 Agent 运行时。
+"""AgentLoop — 可扩展的通用 AI Agent。
 
 Agent 负责模型驱动的决策与 ReAct 循环；Harness 在循环边界提供权限、
 钩子、上下文管理和模型路由。

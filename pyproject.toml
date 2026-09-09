@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "agentloop"
 version = "0.1.1"
-description = "AgentLoop — an extensible agent runtime for local tasks, with tool dispatch, permission gates, hooks, context management, and multi-provider model routing."
+description = "AgentLoop — an extensible general-purpose AI agent with tool calling, permission controls, context management, and multi-provider model routing."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

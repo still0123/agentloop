@@ -98,7 +98,7 @@ def build_default_agent(
     )
 
     system_prompt = (
-        f"You are AgentLoop, an agent for local tasks working in {workdir}. "
+        f"You are AgentLoop, a general-purpose AI agent working in {workdir}. "
         "Use tools to solve tasks; act, don't explain. "
         "For multi-step tasks, call todo_write first and keep it updated. "
         "After running verification commands, state the command and its exit code "
