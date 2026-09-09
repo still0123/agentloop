@@ -1,15 +1,8 @@
-"""Agent Loop 内核（对应课程 s01——17 章过去，这里始终 30 行左右）。
+"""Agent 的 ReAct 执行循环。
 
-循环的退出条件只有一个信号：模型回复里不再有 tool_use 块。
-其余一切都是"挂"上来的：
-    轮首：  compactor.prepare()     —— 压缩管线（s08）
-    输入前：UserPromptSubmit hooks  —— 注入/改写输入（s04）
-    执行前：PreToolUse hooks        —— 权限闸门挂在这里（s03→s04）
-    执行后：PostToolUse hooks       —— 日志/审计（s04）
-    退出前：Stop hooks              —— 收尾或强制续跑（s04/s17 的雏形）
-    工具层：查表分发                 —— 加工具不改循环（s02）
-    计划：  todo reminder 注入       —— 3 轮不更新计划就提醒（s05）
-    恢复：  prompt_too_long → reactive compact，重试一次（s08）
+模型不再返回工具调用时，由停止钩子决定结束或继续。上下文压缩、输入与
+工具钩子、权限校验、工具分发、待办提醒，以及超出上下文窗口后的恢复
+逻辑都在循环边界协调执行。
 """
 
 from __future__ import annotations
@@ -291,7 +284,7 @@ class Agent:
                     )
                     return _cancelled_result(messages, turns, usage, emit)
 
-            # s05 reminder：连续 3 轮没更新计划，把提醒拍在结果后面
+            # 连续三轮未更新计划时，向模型注入待办提醒。
             todo_gap = 0 if used_todo else todo_gap + 1
             if todo_gap >= 3:
                 results.append(

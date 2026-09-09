@@ -1,7 +1,6 @@
-"""模型接入层 —— 多提供商路由 + 统一内部格式。
+"""模型接入层，提供多提供商路由和统一内部格式。
 
-这是 AgentLoop 相对教程版的主要差异化点之一：教程绑定 Anthropic SDK
-单一模型；AgentLoop 把"调用模型"抽象成边界适配器：
+模型调用在边界适配为统一的内容块格式：
 
     内部统一格式（Anthropic 风格 content blocks）
         ↑↓ 适配只发生在这层边界上
@@ -10,10 +9,9 @@
     MockClient（脚本回放，测试零网络）
     FallbackClient（主模型连续失败自动切换备用模型）
 
-为什么内部格式选 Anthropic 风格的 blocks：
+内部格式采用 Anthropic 风格的内容块：
     messages 为 str | list[block]，tool_use / tool_result 是显式的块类型，
-    与 learn-claude-code 课程一一对应（学习迁移成本最低），
-    且天然支持一条消息里混合"文本 + 多个工具调用"。
+    并支持一条消息混合文本和多个工具调用。
 """
 
 from __future__ import annotations
