@@ -56,7 +56,7 @@ def test_todo_reminder_after_three_gap_rounds(workdir):
         for b in m["content"]
         if b.get("type") == "text"
     ]
-    assert any("<reminder>Update your todos.</reminder>" in t for t in texts)
+    assert any("<reminder>Review progress." in t for t in texts)
 
 
 def test_todo_usage_resets_reminder(workdir):
@@ -107,6 +107,10 @@ def test_event_callback_reports_tool_roundtrip(workdir):
 
     result = agent.run("run echo", on_event=events.append)
 
+    contexts = [event for event in events if event["type"] == "context_prepared"]
+    assert len(contexts) == 2
+    assert all(event["budget_satisfied"] for event in contexts)
+    events = [event for event in events if event["type"] != "context_prepared"]
     assert [event["type"] for event in events] == [
         "run_start",
         "model_start",
@@ -191,3 +195,15 @@ def test_model_cancellation_becomes_cancelled_result(workdir):
 
     assert result.stopped_reason == "cancelled"
     assert events[-1]["type"] == "done"
+
+
+def test_no_todo_reminder_when_tool_is_not_registered(workdir):
+    from agentloop.tools import Toolbox
+
+    agent, _ = make_agent([[("ping", {})]] * 4 + ["done"], workdir)
+    agent.toolbox = Toolbox()
+    agent.toolbox.add(
+        "ping", "ping", {"type": "object", "properties": {}}, lambda: "ok"
+    )
+    result = agent.run("bounded investigation")
+    assert "<reminder>Review progress." not in str(result.messages)

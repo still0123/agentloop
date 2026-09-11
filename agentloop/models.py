@@ -35,6 +35,7 @@ class ModelResponse:
     # Provider 原始结束原因，例如 OpenAI 的 "length" 或 Anthropic 的
     # "max_tokens"。None 表示提供商没有给出该字段。
     finish_reason: str | None = None
+    reasoning_content: str | None = None
 
 
 class ModelError(RuntimeError):
@@ -190,13 +191,18 @@ def _openai_wire_messages(system: str, messages: list) -> list:
     for msg in messages:
         role, content = msg.get("role"), msg.get("content")
         if isinstance(content, str):
-            wire.append({"role": role, "content": content})
+            entry = {"role": role, "content": content}
+            if role == "assistant" and isinstance(msg.get("reasoning_content"), str):
+                entry["reasoning_content"] = msg["reasoning_content"]
+            wire.append(entry)
             continue
         if role == "assistant":
             text = "".join(
                 b.get("text", "") for b in content if b.get("type") == "text"
             )
             entry = {"role": "assistant", "content": text}
+            if isinstance(msg.get("reasoning_content"), str):
+                entry["reasoning_content"] = msg["reasoning_content"]
             calls = [
                 {
                     "id": b["id"],
@@ -254,7 +260,8 @@ class OpenAICompatClient:
         retries: int = 3,
         should_stop: Callable[[], bool] | None = None,
         disable_thinking: bool = False,
-        tool_choice: str = "auto",
+        tool_choice: str | None = "auto",
+        reasoning_effort: str | None = None,
     ) -> None:
         self.model = model
         self.base_url = base_url.rstrip("/")
@@ -264,7 +271,8 @@ class OpenAICompatClient:
         self.retries = retries
         self.should_stop = should_stop
         self.disable_thinking = disable_thinking
-        if tool_choice not in ("auto", "none", "required"):
+        self.reasoning_effort = reasoning_effort
+        if tool_choice not in (None, "auto", "none", "required"):
             raise ValueError("invalid tool_choice")
         self.tool_choice = tool_choice
 
@@ -284,6 +292,9 @@ class OpenAICompatClient:
         }
         if self.disable_thinking:
             payload["thinking"] = {"type": "disabled"}
+        elif self.reasoning_effort is not None:
+            payload["thinking"] = {"type": "enabled"}
+            payload["reasoning_effort"] = self.reasoning_effort
         if tools:
             payload["tools"] = [
                 {
@@ -296,7 +307,8 @@ class OpenAICompatClient:
                 }
                 for t in tools
             ]
-            payload["tool_choice"] = self.tool_choice
+            if self.tool_choice is not None:
+                payload["tool_choice"] = self.tool_choice
 
         headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -348,6 +360,7 @@ class OpenAICompatClient:
         on_text: Callable[[str], None],
     ) -> ModelResponse:
         text_parts: list[str] = []
+        reasoning_parts: list[str] = []
         tool_calls: dict[int, dict] = {}
         usage: dict = {}
         finish_reason: str | None = None
@@ -362,6 +375,9 @@ class OpenAICompatClient:
                 if choice.get("finish_reason") is not None:
                     finish_reason = choice["finish_reason"]
                 delta = choice.get("delta") or {}
+                reasoning = delta.get("reasoning_content")
+                if isinstance(reasoning, str):
+                    reasoning_parts.append(reasoning)
                 text = delta.get("content")
                 if isinstance(text, str) and text:
                     text_parts.append(text)
@@ -409,6 +425,9 @@ class OpenAICompatClient:
                     {
                         "message": {
                             "content": text or None,
+                            "reasoning_content": "".join(reasoning_parts)
+                            if reasoning_parts
+                            else None,
                             "tool_calls": wire_calls,
                         },
                         "finish_reason": finish_reason,
@@ -449,6 +468,9 @@ class OpenAICompatClient:
                 "output_tokens": usage.get("completion_tokens", 0),
             },
             finish_reason=data["choices"][0].get("finish_reason"),
+            reasoning_content=message.get("reasoning_content")
+            if isinstance(message.get("reasoning_content"), str)
+            else None,
         )
 
 
@@ -490,7 +512,14 @@ class AnthropicClient:
             "system": system,
             # json 往返一趟：剥掉测试里可能混入的非序列化对象
             "messages": json.loads(
-                json.dumps(messages, ensure_ascii=False, default=str)
+                json.dumps(
+                    [
+                        {k: v for k, v in message.items() if k != "reasoning_content"}
+                        for message in messages
+                    ],
+                    ensure_ascii=False,
+                    default=str,
+                )
             ),
         }
         if tools:

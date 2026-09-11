@@ -115,6 +115,7 @@ def build_default_agent(
         compactor,
         system_prompt,
         should_stop=should_stop,
+        finalize_turns=2,
     )
 
 

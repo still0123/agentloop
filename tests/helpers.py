@@ -15,6 +15,7 @@ def make_agent(
     compactor_kwargs=None,
     max_turns=40,
     should_stop=None,
+    **agent_kwargs,
 ):
     """返回 (agent, mock_client)。
 
@@ -41,6 +42,7 @@ def make_agent(
         system_prompt="test",
         max_turns=max_turns,
         should_stop=should_stop,
+        **agent_kwargs,
     )
     return agent, mock
 

@@ -11,6 +11,8 @@ import json
 from collections.abc import Callable
 from typing import Any
 
+from .artifacts import wire_messages
+
 
 class ContextBudgetError(RuntimeError):
     """本地预算不足，和提供商返回的上下文超限错误区分开。"""
@@ -99,7 +101,11 @@ class RequestBudget:
     ) -> int:
         """估算完整请求输入，包括 JSON 和每种协议项的包装开销。"""
 
-        payload = {"system": system, "tools": tools or [], "messages": messages}
+        payload = {
+            "system": system,
+            "tools": tools or [],
+            "messages": wire_messages(messages),
+        }
         serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         content_tokens = self._count(serialized)
         envelope_tokens = self._REQUEST_ENVELOPE_TOKENS

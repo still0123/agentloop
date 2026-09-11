@@ -36,13 +36,13 @@ def test_old_results_remain_retrievable_without_mutating_session(workdir):
     for i in range(5):
         messages += pair(str(i), f"evidence-{i}:" + "x" * 500)
     original = copy.deepcopy(messages)
-    out = Compactor(workdir, keep_recent_results=1).prepare(messages)
+    out = Compactor(workdir, keep_recent_results=1, char_limit=3000).prepare(messages)
     marker = out[2]["content"][0]["content"]
     path = marker.removeprefix("[Earlier tool result saved at ").removesuffix("]")
     toolbox, _ = build_toolbox(workdir)
-    assert toolbox.execute({"name": "read_file", "input": {"path": path}}) == (
-        "evidence-0:" + "x" * 500
-    )
+    assert json.loads(toolbox.execute({"name": "read_file", "input": {"path": path}}))[
+        "text"
+    ] == ("evidence-0:" + "x" * 500)
     assert messages == original
     assert out[-1] == original[-1]
 
@@ -56,7 +56,9 @@ def test_recent_result_retention_does_not_use_negative_slice(workdir, consumed):
 
 
 def test_spill_paths_ignore_untrusted_ids_and_do_not_overwrite(workdir):
-    c = Compactor(workdir, batch_budget=100, spill_threshold=100, spill_preview=20)
+    c = Compactor(
+        workdir, batch_budget=100, spill_threshold=100, spill_preview=20, char_limit=500
+    )
     paths = []
     for value in ["a" * 1000, "b" * 1000]:
         out = c.prepare(pair("../../escape", value))
@@ -126,7 +128,7 @@ def test_agent_continues_with_tool_after_summary_failure(workdir):
 
 
 def test_repeated_placeholder_keeps_original_evidence_path(workdir):
-    c = Compactor(workdir, keep_recent_results=0)
+    c = Compactor(workdir, keep_recent_results=0, char_limit=1000)
     original = "unique evidence" * 100
     messages = [{"role": "user", "content": "q"}, *pair("old", original)]
     messages += pair("new", "recent")

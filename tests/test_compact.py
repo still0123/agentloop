@@ -30,7 +30,11 @@ def _assert_pairing_intact(messages):
 
 def test_spill_writes_disk_and_keeps_path(workdir):
     compactor = Compactor(
-        workdir, client=None, batch_budget=20_000, spill_threshold=30_000
+        workdir,
+        client=None,
+        batch_budget=20_000,
+        spill_threshold=30_000,
+        char_limit=5_000,
     )
     messages = [{"role": "user", "content": "q"}, *_pair("t1", "x" * 40_000)]
     out = compactor.prepare(messages)
@@ -112,6 +116,7 @@ def test_placeholder_replaces_old_but_not_new(workdir):
         + list(_pair("t3", "c" * 300))  # 最近一条已读 → 保留
         + list(_pair("t4", "d" * 500))  # 最新批次（未读）→ 必须完整
     )
+    compactor.char_limit = compactor._estimate(messages) - 300
     out = compactor.prepare(messages)
     contents = [
         b["content"]
@@ -137,9 +142,62 @@ def test_placeholder_keeps_spill_path(workdir):
         *_pair("t0", marked),
         *_pair("t1", "newest"),
     ]
+    compactor.char_limit = compactor._estimate(messages) - 100
     out = compactor.prepare(messages)
     old = out[2]["content"][0]["content"]
     assert old == f"[Earlier tool result saved at {saved}]"
+
+
+def test_history_eviction_precedes_new_batch_spill(workdir):
+    """A new bounded evidence page stays inline when old results can pay for it."""
+    messages = (
+        [{"role": "user", "content": "diagnose"}]
+        + list(_pair("old-1", "a" * 1800))
+        + list(_pair("old-2", "b" * 1800))
+        + list(_pair("new-page", "NEW_EVIDENCE=" + "c" * 5000))
+    )
+    c = Compactor(
+        workdir,
+        client=None,
+        batch_budget=1000,
+        spill_threshold=1000,
+        keep_recent_results=1,
+        placeholder_limit=100,
+    )
+    # Replacing both consumed pages makes the request fit.  The old ordering
+    # spilled the newest page before attempting those replacements.
+    c.char_limit = c._estimate(messages) - 3200
+    out = c.prepare(messages)
+    results = [
+        block["content"]
+        for message in out
+        if isinstance(message.get("content"), list)
+        for block in message["content"]
+        if block.get("type") == "tool_result"
+    ]
+    assert results[-1] == "NEW_EVIDENCE=" + "c" * 5000
+    assert any(
+        value.startswith("[Earlier tool result saved at ") for value in results[:-1]
+    )
+    assert "Full output:" not in results[-1]
+    _assert_pairing_intact(out)
+
+
+def test_new_batch_spills_when_history_cannot_make_it_fit(workdir):
+    messages = [{"role": "user", "content": "diagnose"}, *_pair("new-page", "x" * 5000)]
+    c = Compactor(
+        workdir,
+        client=None,
+        batch_budget=1000,
+        spill_threshold=1000,
+        spill_preview=200,
+        char_limit=1500,
+    )
+    out = c.prepare(messages)
+    newest = out[-1]["content"][0]["content"]
+    assert "Full output: .task_outputs/tool-results/" in newest
+    assert len(newest) < 500
+    _assert_pairing_intact(out)
 
 
 def test_summarize_replaces_history(workdir):

@@ -20,15 +20,16 @@ AgentLoop 集成工具调用、权限控制与上下文管理，支持文件处�
 
 | 模块 | 能力 | 代码入口 |
 |---|---|---|
-| Agent Loop | 多轮模型—工具—观察循环，最大轮数保护、流式事件与任务取消 | [agent.py](agentloop/agent.py) |
+| Agent Loop | 多轮执行、轮数上限、收尾预算、重复结果提示、完成与取消区分 | [agent.py](agentloop/agent.py) |
 | 上下文管理 | 完整请求预算、大结果归档、增量摘要、失败重放与文件回读 | [compact.py](agentloop/compact.py) |
-| 工具系统 | 文件读写、搜索、Shell、Glob、任务计划的注册与分发 | [tools.py](agentloop/tools.py) |
+| 工具系统 | 按需组合文件、搜索、Shell 和计划工具；命令输出落盘回读 | [tools.py](agentloop/tools.py) / [command.py](agentloop/command.py) |
+| 标识符引用 | 为已核验的值生成稳定短编号，校验任务范围与类型，保留来源 | [references.py](agentloop/references.py) |
 | 权限控制 | 硬拒绝、风险识别和交互式审批 | [permission.py](agentloop/permission.py) |
 | 生命周期扩展 | 输入、工具前后、停止四类 Hook | [hooks.py](agentloop/hooks.py) |
 | 模型接入 | OpenAI 兼容协议、Anthropic 协议、重试与回退 | [models.py](agentloop/models.py) |
 | 交互界面 | CLI、Web 会话和 macOS 桌面壳 | [cli.py](agentloop/cli.py) / [web.py](agentloop/web.py) |
 
-工具调用经过统一入口。文件工具检查工作区边界；Shell 工具支持超时、取消和输出上限。权限规则会拒绝命中硬规则的操作，并将风险操作交给调用方审批。当前规则是本地执行策略，不构成 Shell 沙箱。
+工具调用经过统一入口。文件工具检查工作区或调用方指定的只读根目录；Shell 工具支持超时、取消和输出上限，并保存本地输出供回读。权限规则会拒绝命中硬规则的操作，并将风险操作交给调用方审批。当前规则是本地执行策略，不构成 Shell 沙箱。
 
 ## 使用场景
 
@@ -63,6 +64,8 @@ flowchart TD
 
 消息历史使用有序列表，保留模型输出、工具调用和结果的先后关系；工具注册表按名称映射到描述、参数 schema 和 handler。每轮模型调用前，`Compactor.prepare()` 生成满足预算的消息列表；工具结果写回历史后，循环进入下一轮决策。
 
+轮数上限限制模型决策次数，最后一轮请求的工具仍会经过权限检查并执行。调用方可以预留收尾轮次，只开放报告等完成工具；提交成功后通过完成回调退出，无需再请求模型确认。相同参数反复取得相同结果时，运行时提示模型重新判断，不缓存结果或强制指定业务步骤。集成方式与时间预算边界见[执行控制](docs/runtime.md)。
+
 ## 上下文机制
 
 长任务中的上下文由当前消息、摘要和本地归档共同组成。实现采用“程序归档与采样 + 增量摘要”的组合：保存已获取的原始结果，同时控制送入模型的请求规模。
@@ -86,7 +89,8 @@ flowchart LR
 关键机制：
 
 - **完整请求预算**：估算系统提示、工具定义与消息，另外预留输出容量。默认估算器按 UTF-8 字节计数，作为保守的应用层预算；可替换为提供商对应的 tokenizer。
-- **大结果归档**：超预算的工具输出保存为本地文件，消息中保留首尾、错误相关片段和路径引用。`search_file` 可定位内容，`read_file` 支持分页读取。
+- **大结果归档**：超预算的工具输出保存为本地文件，消息中保留首尾、错误相关片段和路径引用。`search_file` 可定位内容，归档通过 `read_file(char_offset, max_chars)` 分页回读并保持原始引用。
+- **近期结果保留**：请求预算足够时保留原始结果；预算紧张时优先淘汰较旧结果，保护最新调用组。
 - **增量 checkpoint**：历史消息达到阈值或仍不满足预算时，压缩较早部分并保留近期完整消息组。工具调用与结果的关联不会在切点被拆开。
 - **请求原文记录**：检查点按顺序保存用户输入的原文与来源 ID，避免摘要改写早期要求。后续要求如何覆盖或修改早期要求，仍由模型在上下文中判断。
 - **失败恢复**：摘要为空、过长、明确截断或调用失败时，优先保留上次有效摘要，并归档未处理历史；再次触发摘要时按预算重放。最终预算不足则明确报错。
@@ -148,6 +152,7 @@ agentloop web
 | 内容 | 位置 |
 |---|---|
 | 使用、配置和桌面应用 | [docs/usage.md](docs/usage.md) |
+| 执行预算、工具组合和输出回读 | [docs/runtime.md](docs/runtime.md) |
 | 上下文评估口径与复现 | [docs/evaluation.md](docs/evaluation.md) |
 | 归档回放证据 | [docs/evidence/](docs/evidence/) |
 | Agent 主循环 | [agentloop/agent.py](agentloop/agent.py) |
@@ -162,3 +167,5 @@ agentloop web
 ## License
 
 [MIT](LICENSE) © 2026 AgentLoop contributors
+
+上下文管理与执行边界的设计说明见 [docs/context-management.md](docs/context-management.md)。

@@ -10,17 +10,16 @@
 
 from __future__ import annotations
 
-import glob as globlib
+import fnmatch
 import os
-import signal
-import subprocess
-import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
-MAX_TOOL_OUTPUT = 200_000  # Shell 超出此范围的原始输出在工具层截断，压缩层无法恢复。
+from .artifacts import ToolOutput, read_artifact
+
 MAX_READ_LINES = 200
 MAX_READ_CHARS = 50_000
 MAX_SEARCH_MATCHES = 50
@@ -76,6 +75,24 @@ def safe_path(workdir: Path, path: str) -> Path:
     return resolved
 
 
+def _glob_matches(path: str, pattern: str) -> bool:
+    parts, patterns = path.split("/"), pattern.split("/")
+
+    @lru_cache(None)
+    def match(i, j):
+        if j == len(patterns):
+            return i == len(parts)
+        if patterns[j] == "**":
+            return match(i, j + 1) or (i < len(parts) and match(i + 1, j))
+        return (
+            i < len(parts)
+            and fnmatch.fnmatchcase(parts[i], patterns[j])
+            and match(i + 1, j + 1)
+        )
+
+    return match(0, 0)
+
+
 @dataclass
 class ToolDef:
     name: str
@@ -116,11 +133,30 @@ class Toolbox:
         if tool is None:
             return f"Error: unknown tool '{block.get('name')}'"
         try:
-            return str(tool.handler(**block.get("input", {})))
+            output = tool.handler(**block.get("input", {}))
+            return output if isinstance(output, ToolOutput) else str(output)
         except TypeError as exc:
             return f"Error: bad arguments for {tool.name}: {exc}"
         except Exception as exc:  # noqa: BLE001 —— 工具错误必须回到模型，而不是炸掉循环
             return f"Error: {type(exc).__name__}: {exc}"
+
+    def select(self, names: Collection[str]) -> Toolbox:
+        """Reuse handlers without giving an embedding application unwanted tools."""
+        unknown = set(names) - set(self.names)
+        if unknown:
+            raise ValueError(f"unknown tools: {sorted(unknown)}")
+        selected = Toolbox()
+        selected._tools = {
+            name: tool for name, tool in self._tools.items() if name in names
+        }
+        return selected
+
+    def extend(self, other: Toolbox) -> None:
+        """Compose capability sets atomically; never silently replace a handler."""
+        duplicates = set(self.names) & set(other.names)
+        if duplicates:
+            raise ValueError(f"duplicate tool names: {sorted(duplicates)}")
+        self._tools.update(other._tools)
 
 
 # ---------------------------------------------------------------------------
@@ -174,53 +210,56 @@ class TodoManager:
 # ---------------------------------------------------------------------------
 
 
-def build_toolbox(workdir: Path, should_stop: Callable[[], bool] | None = None):
+def build_toolbox(
+    workdir: Path,
+    should_stop: Callable[[], bool] | None = None,
+    *,
+    include: Collection[str] | None = None,
+    read_roots: Mapping[str, Path] | None = None,
+):
     """返回 (Toolbox, TodoManager)。workdir 由调用方钉死，工具闭包引用它。"""
-    workdir = Path(workdir)
+    workdir = Path(workdir).resolve()
+    roots = {"workspace": workdir}
+    for name, path in (read_roots or {}).items():
+        if not name or name == "workspace":
+            raise ValueError("read root names must be nonempty and not 'workspace'")
+        root_path = Path(path).resolve()
+        if not root_path.is_dir():
+            raise ValueError(f"read root is not a directory: {name}")
+        roots[name] = root_path
+
+    def read_root(name):
+        if name not in roots:
+            raise ValueError(f"unknown read root: {name}; available: {list(roots)}")
+        return roots[name]
+
     should_stop = should_stop or (lambda: False)
     todo = TodoManager()
     box = Toolbox()
 
     def run_bash(command: str, timeout: int = 60) -> str:
-        if should_stop():
-            return "Error: command cancelled by user"
-        proc = subprocess.Popen(
-            ["bash", "-c", command],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            cwd=str(workdir),
-            start_new_session=True,
-        )
-        deadline = time.monotonic() + timeout
-        while True:
-            if should_stop():
-                _terminate_process(proc)
-                return "Error: command cancelled by user"
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                _terminate_process(proc)
-                return f"Error: command timed out after {timeout}s"
-            try:
-                stdout, stderr = proc.communicate(timeout=min(0.1, remaining))
-                break
-            except subprocess.TimeoutExpired:
-                continue
-        parts = [f"exit={proc.returncode}"]
-        if stdout:
-            parts.append("[stdout]\n" + stdout)
-        if stderr:
-            parts.append("[stderr]\n" + stderr)
-        text = "\n".join(parts)
-        if len(text) > MAX_TOOL_OUTPUT:
-            text = (
-                text[:MAX_TOOL_OUTPUT] + f"\n... (truncated, {len(text)} chars total)"
-            )
-        return text
+        from .command import run_command
 
-    def run_read(path: str, limit: int | None = None, offset: int | None = None) -> str:
+        return run_command(workdir, command, timeout, should_stop)
+
+    def run_read(
+        path: str,
+        limit: int | None = None,
+        offset: int | None = None,
+        root: str = "workspace",
+        char_offset: int = 0,
+        max_chars: int = 6000,
+    ) -> str:
         """Read a bounded page.  Offset is 1-based to match editor line numbers."""
-        target = safe_path(workdir, path)
+        target = safe_path(read_root(root), path)
+        if target.is_relative_to(
+            workdir.resolve() / ".task_outputs/tool-results"
+        ) or target.is_relative_to(workdir.resolve() / ".transcripts"):
+            if offset is not None or limit is not None:
+                raise ValueError(
+                    "Archives use char_offset/max_chars; follow next_char_offset"
+                )
+            return read_artifact(workdir, target, char_offset, max_chars)
         requested_limit = limit
         paged = offset is not None
         if offset is None:
@@ -263,10 +302,14 @@ def build_toolbox(workdir: Path, should_stop: Callable[[], bool] | None = None):
         return output
 
     def run_search(
-        path: str, query: str, context: int = 2, max_matches: int = 20
+        path: str,
+        query: str,
+        context: int = 2,
+        max_matches: int = 20,
+        root: str = "workspace",
     ) -> str:
         """Literal, bounded search intended for compacted transcript/output recall."""
-        target = safe_path(workdir, path)
+        target = safe_path(read_root(root), path)
         if not isinstance(query, str) or not query or "\n" in query or "\r" in query:
             raise ValueError("query must be a non-empty single-line string")
         if len(query) > MAX_SEARCH_QUERY_CHARS:
@@ -425,12 +468,39 @@ def build_toolbox(workdir: Path, should_stop: Callable[[], bool] | None = None):
         note = f" (first of {occurrences} occurrences)" if occurrences > 1 else ""
         return f"Edited {path}{note}"
 
-    def run_glob(pattern: str) -> str:
-        matches = sorted(globlib.glob(pattern, root_dir=str(workdir), recursive=True))
+    def run_glob(pattern: str, root: str = "workspace") -> str:
+        directory = read_root(root)
+        if Path(pattern).is_absolute() or ".." in Path(pattern).parts:
+            raise ValueError("glob pattern must be relative and cannot contain '..'")
+        # os.walk does not recurse into symlink directories; glob's recursive
+        # implementation does. Reject such directories before descending.
+        matches = []
+        scanned = 0
+        for current, dirs, files in os.walk(directory, followlinks=False):
+            dirs[:] = [name for name in dirs if not (Path(current) / name).is_symlink()]
+            for name in [*dirs, *files]:
+                scanned += 1
+                if scanned > 50_000:
+                    break
+                candidate = Path(current) / name
+                rel = candidate.relative_to(directory).as_posix()
+                if not candidate.resolve().is_relative_to(directory):
+                    continue
+                if _glob_matches(rel, pattern):
+                    matches.append(rel)
+                    if len(matches) >= 501:
+                        break
+            if len(matches) >= 501 or scanned > 50_000:
+                break
+        matches.sort()
+        if scanned > 50_000:
+            return "\n".join(matches + ["... (partial scan; refine root or pattern)"])
         if not matches:
             return "(no matches)"
         if len(matches) > 500:
-            matches = matches[:500] + [f"... ({len(matches)} matches total)"]
+            matches = matches[:500] + [
+                "... (stopped after 500 matches; narrow pattern)"
+            ]
         return "\n".join(matches)
 
     def run_todo(todos) -> str:
@@ -439,12 +509,14 @@ def build_toolbox(workdir: Path, should_stop: Callable[[], bool] | None = None):
 
     box.add(
         "bash",
-        "Run a shell command in the workspace and return exit code and output.",
+        "Run a shell command in the workspace. Return exit code, bounded preview "
+        "and local stdout/stderr paths; read/search those files for full evidence. "
+        "Timeout/cancellation preserve partial output. Not a shell sandbox.",
         {
             "type": "object",
             "properties": {
                 "command": {"type": "string"},
-                "timeout": {"type": "integer"},
+                "timeout": {"type": "integer", "minimum": 1, "maximum": 600},
             },
             "required": ["command"],
         },
@@ -453,13 +525,16 @@ def build_toolbox(workdir: Path, should_stop: Callable[[], bool] | None = None):
     box.add(
         "read_file",
         "Read a bounded page from a text file inside the workspace. "
-        "offset is a 1-based line number; use the returned next offset for more.",
+        "offset is a 1-based line number. Archives in .task_outputs/tool-results "
+        "or .transcripts instead use char_offset/max_chars; follow next_char_offset.",
         {
             "type": "object",
             "properties": {
                 "path": {"type": "string"},
                 "limit": {"type": "integer"},
                 "offset": {"type": "integer", "minimum": 1},
+                "char_offset": {"type": "integer", "minimum": 0},
+                "max_chars": {"type": "integer", "minimum": 1, "maximum": 12000},
             },
             "required": ["path"],
         },
@@ -518,21 +593,25 @@ def build_toolbox(workdir: Path, should_stop: Callable[[], bool] | None = None):
     box.add(
         "todo_write",
         "Create or replace the session todo list. "
-        "Plan before executing multi-step tasks.",
+        "Plan once for multi-step tasks; update only when a step changes. "
+        "Every item needs nonempty content; at most one may be in_progress.",
         {
             "type": "object",
             "properties": {
                 "todos": {
                     "type": "array",
+                    "maxItems": 20,
                     "items": {
                         "type": "object",
                         "properties": {
-                            "content": {"type": "string"},
+                            "content": {"type": "string", "minLength": 1},
                             "status": {
                                 "type": "string",
                                 "enum": ["pending", "in_progress", "completed"],
                             },
                         },
+                        "required": ["content", "status"],
+                        "additionalProperties": False,
                     },
                 }
             },
@@ -540,19 +619,12 @@ def build_toolbox(workdir: Path, should_stop: Callable[[], bool] | None = None):
         },
         run_todo,
     )
-    return box, todo
-
-
-def _terminate_process(proc: subprocess.Popen) -> None:
-    try:
-        os.killpg(proc.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return
-    try:
-        proc.communicate(timeout=1)
-    except subprocess.TimeoutExpired:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        proc.communicate()
+    for name in ("read_file", "search_file", "glob"):
+        definition = box._tools[name]
+        definition.input_schema["properties"]["root"] = {
+            "type": "string",
+            "enum": list(roots),
+            "default": "workspace",
+        }
+        definition.description += " Select root: " + ", ".join(roots) + "."
+    return (box if include is None else box.select(include)), todo
