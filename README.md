@@ -6,7 +6,7 @@
 
 `Python 3.10+` · `OpenAI-compatible / Anthropic` · `CLI / Web / macOS` · `MIT`
 
-[核心能力](#核心能力) · [使用场景](#使用场景) · [流水线排障](#实际应用流水线排障) · [架构](#架构) · [上下文机制](#上下文机制) · [验证](#验证) · [快速开始](#快速开始)
+[核心能力](#核心能力) · [使用场景](#使用场景) · [流水线排障](#实际应用流水线排障) · [Skill 示例](#排障-skill-示例) · [架构](#架构) · [上下文机制](#上下文机制) · [验证](#验证) · [快速开始](#快速开始)
 
 </div>
 
@@ -61,6 +61,16 @@ AgentLoop 被用于流水线排障机器人：通过飞书接收流水线输入�
 **职责划分：** AgentLoop 提供通用执行机制；配套业务项目 PipelineAgent（私有仓库）负责飞书接入、固定调查范围、采集日志、核验请求映射、维护证据关系，以及校验诊断报告。业务层登记经过核验的标识，核心引用表检查作用域与类型。纯诊断模式仅装配受控读取和查询工具，不向模型开放通用 Shell 或文件写工具。集成接口见[执行控制与工具组合](docs/runtime.md)。
 
 **验证与当前边界：** 核心执行控制已有[行为测试](tests/test_execution_control.py)，上下文机制的评估口径见[评估说明](docs/evaluation.md)。业务操作手册记录了基于已保存真实证据的人工复核案例，展示客户端超时、服务内 RPC 超时与下游稍后完成之间的时间线，以及仍待确认的深层原因。该案例不代表模型自动完成报告或飞书成功交付，也不构成诊断成功率测量。“关键证据足够时及时自动交付”的统一业务判定仍在完善。
+
+## 排障 Skill 示例
+
+仓库提供一个[流水线失败诊断 Skill](skills/pipeline-failure-diagnosis/SKILL.md)，展示如何把排障经验整理成模型可使用的调查流程：固定运行、关联请求与证据、按生命周期或挂载等问题选择补查路径，并区分事实、推断和缺口。
+
+- [Skill 主文档](skills/pipeline-failure-diagnosis/SKILL.md)：调查流程与执行边界，详细业务分支按需读取。
+- [合成案例](skills/pipeline-failure-diagnosis/examples/synthetic-case.md)：调用超时、下游稍后完成时如何形成受限结论。
+- [接入说明](docs/skill-integration.md)：显式加载正文、提供参考资料读取、注册受控业务工具及验收报告。
+
+这是经过脱敏重写的展示示例，不含真实环境配置、凭证或现场日志。Skill 指导调查方法，AgentLoop 提供执行循环，业务应用负责权限与证据校验。当前 CLI 不自动发现 Skill；仅复制文件夹不会获得线上流水线或日志访问能力。
 
 ## 架构
 
@@ -172,6 +182,7 @@ agentloop web
 |---|---|
 | 使用、配置和桌面应用 | [docs/usage.md](docs/usage.md) |
 | 执行预算、工具组合和输出回读 | [docs/runtime.md](docs/runtime.md) |
+| 排障 Skill 示例与显式接入 | [skills/pipeline-failure-diagnosis/SKILL.md](skills/pipeline-failure-diagnosis/SKILL.md) / [docs/skill-integration.md](docs/skill-integration.md) |
 | 上下文评估口径与复现 | [docs/evaluation.md](docs/evaluation.md) |
 | 归档回放证据 | [docs/evidence/](docs/evidence/) |
 | Agent 主循环 | [agentloop/agent.py](agentloop/agent.py) |
@@ -181,7 +192,7 @@ agentloop web
 
 ## 项目边界
 
-当前版本不包含生产级 Shell 沙箱、多工具并发、Subagent/MCP/Skills、多用户远程服务，或跨会话语义记忆检索。这些能力可分别扩展到工具层、Hook、上下文层或模型适配层。
+当前版本不包含生产级 Shell 沙箱、多工具并发、Subagent/MCP 集成、自动 Skill 发现与调度、多用户远程服务，或跨会话语义记忆检索。仓库中的 Skill 示例需由应用显式加载，相关能力可扩展到工具层、Hook、上下文层或模型适配层。
 
 ## License
 
